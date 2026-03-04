@@ -1,6 +1,6 @@
 // =============================================================================
 // GROCERY SHOP BILLING APPLICATION
-// Complete single-page app with LocalStorage persistence
+// Complete single-page app with backend sync + LocalStorage fallback
 // Dark theme, mobile-first, Outfit font
 // =============================================================================
 
@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { useActor } from "@/hooks/useActor";
 import { BrowserMultiFormatReader, NotFoundException } from "@zxing/library";
 import {
   BarChart2,
@@ -55,18 +56,21 @@ import {
   Edit,
   LogOut,
   Menu,
+  MessageSquare,
   Minus,
   Package,
   Plus,
   Printer,
   Search,
   Settings,
+  Share2,
   ShoppingCart,
   Trash2,
   UserCog,
   Users,
   X,
 } from "lucide-react";
+import QRCode from "qrcode";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -86,12 +90,16 @@ interface AppSettings {
   gstinEnabled: boolean;
   billLogoBase64: string;
   websiteLogoBase64: string;
+  showQrOnBill: boolean;
 }
+
+type UserRole = "admin" | "cashier" | "manager" | "accountant";
 
 interface User {
   id: string;
   username: string;
   password: string;
+  role: UserRole;
 }
 
 interface MenuItem {
@@ -115,6 +123,7 @@ interface Order {
   id: string;
   orderNo: number;
   customerName: string;
+  customerPhone?: string;
   paymentMode: "cash" | "qr";
   cashAmount: number;
   items: CartItem[];
@@ -134,6 +143,7 @@ const LS_MENU = "groc_menu";
 const LS_ORDERS = "groc_orders";
 const LS_ORDER_COUNTER = "groc_order_counter";
 const SESSION_KEY = "groc_session";
+const SESSION_ROLE_KEY = "groc_session_role";
 
 // =============================================================================
 // DEFAULT DATA
@@ -150,11 +160,27 @@ const DEFAULT_SETTINGS: AppSettings = {
   gstinEnabled: false,
   billLogoBase64: "",
   websiteLogoBase64: "",
+  showQrOnBill: true,
 };
 
 const DEFAULT_USERS: User[] = [
-  { id: "1", username: "mrpadmin", password: "mrp1230" },
+  { id: "1", username: "mrpadmin", password: "mrp1230", role: "admin" },
 ];
+
+// Role-based page access
+const ROLE_PAGES: Record<UserRole, Page[]> = {
+  admin: [
+    "billing",
+    "manage-menu",
+    "sales-report",
+    "customer-details",
+    "settings",
+    "manage-users",
+  ],
+  manager: ["billing", "manage-menu", "sales-report", "customer-details"],
+  cashier: ["billing"],
+  accountant: ["billing", "sales-report", "customer-details"],
+};
 
 const DEFAULT_MENU: MenuItem[] = [
   {
@@ -250,9 +276,15 @@ interface BillContentProps {
   order: Order;
   settings: AppSettings;
   darkMode?: boolean;
+  qrDataUrl?: string;
 }
 
-function BillContent({ order, settings, darkMode = true }: BillContentProps) {
+function BillContent({
+  order,
+  settings,
+  darkMode = true,
+  qrDataUrl,
+}: BillContentProps) {
   const textColor = darkMode ? "text-white" : "text-black";
   const borderColor = darkMode ? "border-gray-500" : "border-gray-400";
   const mutedColor = darkMode ? "text-gray-400" : "text-gray-600";
@@ -301,6 +333,12 @@ function BillContent({ order, settings, darkMode = true }: BillContentProps) {
           <span>Customer:</span>
           <span className="font-semibold">{order.customerName}</span>
         </div>
+        {order.customerPhone && (
+          <div className="flex justify-between">
+            <span>Phone:</span>
+            <span className={mutedColor}>{order.customerPhone}</span>
+          </div>
+        )}
         <div className="flex justify-between">
           <span>Date:</span>
           <span>{formatDate(order.timestamp)}</span>
@@ -389,6 +427,20 @@ function BillContent({ order, settings, darkMode = true }: BillContentProps) {
         )}
       </div>
 
+      {/* UPI QR Code */}
+      {settings.showQrOnBill && qrDataUrl && (
+        <>
+          <div className={`border-t ${borderColor} my-2`} />
+          <div className="flex flex-col items-center py-2 gap-1">
+            <p className={`text-xs ${mutedColor}`}>
+              {settings.qrNote || "Scan to Pay"}
+            </p>
+            <img src={qrDataUrl} alt="UPI QR" className="w-28 h-28" />
+            <p className={`text-xs ${mutedColor}`}>{settings.upiId}</p>
+          </div>
+        </>
+      )}
+
       <div className={`border-t ${borderColor} my-2`} />
 
       {/* Footer */}
@@ -408,10 +460,363 @@ function BillContent({ order, settings, darkMode = true }: BillContentProps) {
 }
 
 // =============================================================================
+// BUILD BILL TEXT (plain text for sharing)
+// =============================================================================
+function buildBillText(order: Order, settings: AppSettings): string {
+  const sep = "--------------------------------";
+  const d = new Date(order.timestamp);
+  const dateStr = d.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+  const timeStr = d.toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const balance =
+    order.paymentMode === "cash"
+      ? Math.max(0, order.cashAmount - order.total)
+      : 0;
+
+  const lines: string[] = [];
+  lines.push(settings.shopName);
+  if (settings.contact) lines.push(settings.contact);
+  if (settings.address) lines.push(settings.address);
+  lines.push(sep);
+  lines.push(`Order #${order.orderNo} | ${dateStr} ${timeStr}`);
+  lines.push(`Customer: ${order.customerName}`);
+  if (order.customerPhone) lines.push(`Phone: ${order.customerPhone}`);
+  lines.push(sep);
+  for (const item of order.items) {
+    const amt = item.qty * item.mrp;
+    lines.push(`${item.name.padEnd(14)} x${item.qty}   ₹${amt}`);
+  }
+  lines.push(sep);
+  lines.push(`Subtotal: ₹${order.subtotal.toFixed(2)}`);
+  if (order.discount > 0)
+    lines.push(`Discount: -₹${order.discount.toFixed(2)}`);
+  lines.push(`TOTAL: ₹${order.total.toFixed(2)}`);
+  lines.push(`Payment: ${order.paymentMode === "qr" ? "QR Code" : "Cash"}`);
+  if (order.paymentMode === "cash" && order.cashAmount > 0) {
+    lines.push(`Cash Paid: ₹${order.cashAmount.toFixed(2)}`);
+    if (balance > 0) lines.push(`Balance: ₹${balance.toFixed(2)}`);
+  }
+  lines.push(sep);
+  lines.push("Thank you! Visit Again.");
+  lines.push("Powered By Medwin Techs Thanjavur");
+  return lines.join("\n");
+}
+
+// =============================================================================
+// SHARE BILL DIALOG
+// =============================================================================
+interface ShareBillDialogProps {
+  open: boolean;
+  onClose: () => void;
+  order: Order;
+  settings: AppSettings;
+  billQrDataUrl: string;
+}
+
+function ShareBillDialog({
+  open,
+  onClose,
+  order,
+  settings,
+  billQrDataUrl,
+}: ShareBillDialogProps) {
+  const [phone, setPhone] = useState(order.customerPhone || "");
+  const [channel, setChannel] = useState<"whatsapp" | "sms">("whatsapp");
+  const [sharing, setSharing] = useState(false);
+
+  // Reset phone when order changes
+  useEffect(() => {
+    setPhone(order.customerPhone || "");
+  }, [order.customerPhone]);
+
+  const formatPhoneForUrl = (raw: string): string => {
+    const digits = raw.replace(/\D/g, "");
+    if (digits.length >= 10) {
+      // If already has country code (>10 digits and doesn't start with 0)
+      if (digits.length > 10 && !digits.startsWith("0")) return digits;
+      // Prepend 91 for Indian numbers
+      return `91${digits.slice(-10)}`;
+    }
+    return digits;
+  };
+
+  const handleShare = async () => {
+    const billText = buildBillText(order, settings);
+    const formattedPhone = formatPhoneForUrl(phone);
+
+    if (channel === "sms") {
+      const smsBody = encodeURIComponent(billText);
+      const smsUrl = formattedPhone
+        ? `sms:${formattedPhone}?body=${smsBody}`
+        : `sms:?body=${smsBody}`;
+      const a = document.createElement("a");
+      a.href = smsUrl;
+      a.click();
+      onClose();
+      return;
+    }
+
+    // WhatsApp
+    setSharing(true);
+    try {
+      // Try to generate bill image
+      const { toPng } = await import("html-to-image");
+      const orderData = order;
+      const s = settings;
+      const balance2 =
+        orderData.paymentMode === "cash"
+          ? Math.max(0, orderData.cashAmount - orderData.total)
+          : 0;
+      const itemRows = orderData.items
+        .map(
+          (item) =>
+            `<div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;margin-bottom:2px;">
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
+              <span style="text-align:center;">${item.qty}</span>
+              <span style="text-align:right;">₹${item.mrp}</span>
+              <span style="text-align:right;">₹${item.qty * item.mrp}</span>
+            </div>`,
+        )
+        .join("");
+
+      const container = document.createElement("div");
+      container.style.cssText = `
+        position: fixed;
+        left: -9999px;
+        top: 0;
+        width: 380px;
+        background: #ffffff;
+        padding: 24px;
+        font-family: 'Courier New', Courier, monospace;
+        color: #000000;
+        font-size: 14px;
+        line-height: 1.4;
+        z-index: -1;
+      `;
+      container.innerHTML = `
+        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:14px;padding:8px;">
+          ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
+          <div style="text-align:center;margin-bottom:6px;">
+            <p style="font-weight:bold;font-size:16px;margin:0;">${s.shopName}</p>
+            ${s.contact ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
+            ${s.address ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
+          </div>
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="font-size:12px;">
+            <div style="display:flex;justify-content:space-between;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
+            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Time:</span><span>${new Date(orderData.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })}</span></div>
+          </div>
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;font-weight:bold;color:#555;margin-bottom:4px;">
+            <span>Item</span><span style="text-align:center;">Qty</span><span style="text-align:right;">MRP</span><span style="text-align:right;">Amt</span>
+          </div>
+          ${itemRows}
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="font-size:12px;">
+            <div style="display:flex;justify-content:space-between;"><span>Subtotal:</span><span>₹${orderData.subtotal.toFixed(2)}</span></div>
+            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Discount:</span><span>- ₹${orderData.discount.toFixed(2)}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:16px;"><span>TOTAL:</span><span>₹${orderData.total.toFixed(2)}</span></div>
+          </div>
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="font-size:12px;">
+            <div style="display:flex;justify-content:space-between;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
+            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Cash Paid:</span><span>₹${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
+            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>₹${balance2.toFixed(2)}</span></div>` : ""}
+            ${s.gstinEnabled && s.gstin ? `<div style="display:flex;justify-content:space-between;"><span>GSTIN:</span><span>${s.gstin}</span></div>` : ""}
+          </div>
+          ${
+            s.showQrOnBill && billQrDataUrl
+              ? `<hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="text-align:center;padding:8px 0;">
+            <p style="font-size:11px;color:#666;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
+            <img src="${billQrDataUrl}" style="width:120px;height:120px;" />
+            <p style="font-size:11px;color:#666;margin:4px 0 0 0;">${s.upiId}</p>
+          </div>`
+              : ""
+          }
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="text-align:center;font-size:13px;">
+            <p style="font-weight:bold;margin:4px 0;">Thank You!</p>
+            <p style="margin:2px 0;">Visit Again, Come Again!</p>
+            <hr style="border:none;border-top:1px solid #ccc;margin:6px 0;" />
+            <p style="font-weight:600;margin:2px 0;">Powered By Medwin Techs Thanjavur</p>
+            <p style="opacity:0.5;font-size:10px;margin:2px 0;">medwin2105@gmail.com</p>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(container);
+      await new Promise((r) => setTimeout(r, 300));
+
+      const dataUrl = await toPng(container, {
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
+      document.body.removeChild(container);
+
+      // Convert dataUrl to File
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      const imageFile = new File([blob], `bill-${orderData.orderNo}.png`, {
+        type: "image/png",
+      });
+
+      // Try Web Share API with image
+      if (
+        navigator.share &&
+        navigator.canShare &&
+        navigator.canShare({ files: [imageFile] })
+      ) {
+        await navigator.share({
+          files: [imageFile],
+          text: billText,
+        });
+        setSharing(false);
+        onClose();
+        return;
+      }
+
+      // Fallback: open WhatsApp URL
+      const waUrl = formattedPhone
+        ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(billText)}`
+        : `https://wa.me/?text=${encodeURIComponent(billText)}`;
+      window.open(waUrl, "_blank");
+    } catch (err) {
+      console.error("Share failed:", err);
+      // Final fallback
+      const waUrl = formattedPhone
+        ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(billText)}`
+        : `https://wa.me/?text=${encodeURIComponent(billText)}`;
+      window.open(waUrl, "_blank");
+    }
+    setSharing(false);
+    onClose();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent
+        data-ocid="billing.share_bill.dialog"
+        className="bg-card border-border max-w-sm"
+      >
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-primary">
+            <Share2 className="w-5 h-5" />
+            Share Bill
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 py-1">
+          {/* Phone */}
+          <div>
+            <Label className="text-base mb-2 block">
+              Customer Number{" "}
+              <span className="text-muted-foreground text-sm">(optional)</span>
+            </Label>
+            <Input
+              data-ocid="billing.share_phone.input"
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="e.g. 9876543210"
+              className="input-large bg-secondary border-border"
+            />
+          </div>
+
+          {/* Channel selector */}
+          <div>
+            <Label className="text-base mb-2 block">Share via</Label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setChannel("whatsapp")}
+                className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition-colors ${
+                  channel === "whatsapp"
+                    ? "border-green-500 bg-green-500/10 text-green-400"
+                    : "border-border bg-secondary text-muted-foreground hover:border-green-500/50"
+                }`}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  className="w-8 h-8 fill-current"
+                  xmlns="http://www.w3.org/2000/svg"
+                  aria-hidden="true"
+                  role="img"
+                >
+                  <title>WhatsApp</title>
+                  <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
+                </svg>
+                <span className="text-sm font-semibold">WhatsApp</span>
+                <span className="text-xs opacity-70">Image + Text</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setChannel("sms")}
+                className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition-colors ${
+                  channel === "sms"
+                    ? "border-blue-500 bg-blue-500/10 text-blue-400"
+                    : "border-border bg-secondary text-muted-foreground hover:border-blue-500/50"
+                }`}
+              >
+                <MessageSquare className="w-8 h-8" />
+                <span className="text-sm font-semibold">SMS</span>
+                <span className="text-xs opacity-70">Text only</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter className="gap-2 pt-2">
+          <Button
+            data-ocid="billing.share_bill.cancel_button"
+            variant="outline"
+            onClick={onClose}
+            className="border-border"
+          >
+            Cancel
+          </Button>
+          <Button
+            data-ocid="billing.share_bill.confirm_button"
+            onClick={handleShare}
+            disabled={sharing}
+            className={
+              channel === "whatsapp"
+                ? "bg-green-600 hover:bg-green-700 text-white font-bold"
+                : "bg-blue-600 hover:bg-blue-700 text-white font-bold"
+            }
+          >
+            {sharing ? (
+              <span className="flex items-center gap-2">
+                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Preparing…
+              </span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <Share2 className="w-4 h-4" />
+                Share via {channel === "whatsapp" ? "WhatsApp" : "SMS"}
+              </span>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// =============================================================================
 // LOGIN PAGE
 // =============================================================================
 interface LoginPageProps {
-  onLogin: (username: string) => void;
+  onLogin: (username: string, role: UserRole) => void;
   settings: AppSettings;
 }
 
@@ -427,7 +832,11 @@ function LoginPage({ onLogin, settings }: LoginPageProps) {
     );
     if (user) {
       sessionStorage.setItem(SESSION_KEY, username);
-      onLogin(username);
+      sessionStorage.setItem(
+        SESSION_ROLE_KEY,
+        (user.role as string) || "cashier",
+      );
+      onLogin(username, (user.role as UserRole) || "cashier");
     } else {
       setError("Invalid username or password");
     }
@@ -534,11 +943,18 @@ function LoginPage({ onLogin, settings }: LoginPageProps) {
 interface TopBarProps {
   settings: AppSettings;
   currentUser: string;
+  currentRole: string;
   onMenuOpen: () => void;
   onLogout: () => void;
 }
 
-function TopBar({ settings, currentUser, onMenuOpen, onLogout }: TopBarProps) {
+function TopBar({
+  settings,
+  currentUser,
+  currentRole,
+  onMenuOpen,
+  onLogout,
+}: TopBarProps) {
   return (
     <header className="fixed top-0 left-0 right-0 z-40 bg-card border-b border-border h-14 flex items-center px-4">
       <button
@@ -563,9 +979,12 @@ function TopBar({ settings, currentUser, onMenuOpen, onLogout }: TopBarProps) {
         )}
       </div>
       <div className="flex items-center gap-2">
-        <span className="text-sm text-muted-foreground hidden sm:block">
-          {currentUser}
-        </span>
+        <div className="hidden sm:flex flex-col items-end leading-tight">
+          <span className="text-sm font-semibold">{currentUser}</span>
+          <span className="text-xs text-muted-foreground capitalize">
+            {currentRole}
+          </span>
+        </div>
         <button
           type="button"
           onClick={onLogout}
@@ -595,6 +1014,7 @@ interface SlideNavProps {
   onClose: () => void;
   currentPage: Page;
   onNavigate: (page: Page) => void;
+  allowedPages: Page[];
 }
 
 const NAV_ITEMS: { id: Page; label: string; icon: React.ReactNode }[] = [
@@ -635,7 +1055,16 @@ const NAV_OCIDS: Record<Page, string> = {
   "manage-users": "nav.users.link",
 };
 
-function SlideNav({ isOpen, onClose, currentPage, onNavigate }: SlideNavProps) {
+function SlideNav({
+  isOpen,
+  onClose,
+  currentPage,
+  onNavigate,
+  allowedPages,
+}: SlideNavProps) {
+  const visibleItems = NAV_ITEMS.filter((item) =>
+    allowedPages.includes(item.id),
+  );
   return (
     <>
       {/* Overlay */}
@@ -665,7 +1094,7 @@ function SlideNav({ isOpen, onClose, currentPage, onNavigate }: SlideNavProps) {
           </button>
         </div>
         <div className="flex-1 py-4 overflow-y-auto">
-          {NAV_ITEMS.map((item) => (
+          {visibleItems.map((item) => (
             <button
               type="button"
               key={item.id}
@@ -691,6 +1120,335 @@ function SlideNav({ isOpen, onClose, currentPage, onNavigate }: SlideNavProps) {
 }
 
 // =============================================================================
+// BARCODE SCANNER FOR INPUT (scan barcode into a text field)
+// =============================================================================
+interface BarcodeScannerForInputProps {
+  open: boolean;
+  onClose: () => void;
+  onResult: (barcode: string) => void;
+}
+
+function BarcodeScannerForInput({
+  open,
+  onClose,
+  onResult,
+}: BarcodeScannerForInputProps) {
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<"environment" | "user">(
+    "environment",
+  );
+  const [isFlipping, setIsFlipping] = useState(false);
+  const [uploadProcessing, setUploadProcessing] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
+  const isActiveRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const stopReader = useCallback(() => {
+    if (readerRef.current) {
+      try {
+        readerRef.current.reset();
+      } catch {
+        // ignore
+      }
+      readerRef.current = null;
+    }
+    isActiveRef.current = false;
+    setIsInitializing(false);
+  }, []);
+
+  const handleBarcodeResult = useCallback(
+    (code: string) => {
+      onResult(code);
+      toast.success(`Barcode scanned: ${code}`);
+      onClose();
+    },
+    [onResult, onClose],
+  );
+
+  const startScanning = useCallback(
+    async (facing: "environment" | "user") => {
+      if (!videoRef.current) return;
+      setCameraError(null);
+      setIsInitializing(true);
+      isActiveRef.current = true;
+
+      try {
+        const reader = new BrowserMultiFormatReader();
+        readerRef.current = reader;
+
+        const devices = await reader.listVideoInputDevices();
+        let deviceId: string | null = null;
+        if (devices.length > 1) {
+          const keyword = facing === "environment" ? "back" : "front";
+          const matched = devices.find((d) =>
+            d.label.toLowerCase().includes(keyword),
+          );
+          if (matched) {
+            deviceId = matched.deviceId;
+          } else {
+            deviceId =
+              facing === "environment"
+                ? devices[devices.length - 1].deviceId
+                : devices[0].deviceId;
+          }
+        } else if (devices.length === 1) {
+          deviceId = devices[0].deviceId;
+        }
+
+        await reader.decodeFromVideoDevice(
+          deviceId,
+          videoRef.current,
+          (result, err) => {
+            if (!isActiveRef.current) return;
+            if (result) {
+              handleBarcodeResult(result.getText());
+            }
+            if (err && !(err instanceof NotFoundException)) {
+              console.debug("ZXing decode error:", err);
+            }
+          },
+        );
+
+        if (isActiveRef.current) {
+          setIsInitializing(false);
+        }
+      } catch (err: unknown) {
+        if (isActiveRef.current) {
+          const msg =
+            err instanceof Error ? err.message : "Camera access failed";
+          if (
+            msg.toLowerCase().includes("permission") ||
+            msg.toLowerCase().includes("denied") ||
+            msg.toLowerCase().includes("notallowed")
+          ) {
+            setCameraError(
+              "Camera permission denied. Please allow camera access and try again.",
+            );
+          } else if (
+            msg.toLowerCase().includes("notfound") ||
+            msg.toLowerCase().includes("no camera")
+          ) {
+            setCameraError("No camera found on this device.");
+          } else {
+            setCameraError(`Camera error: ${msg}`);
+          }
+          setIsInitializing(false);
+        }
+      }
+    },
+    [handleBarcodeResult],
+  );
+
+  useEffect(() => {
+    if (!open) {
+      stopReader();
+      setCameraError(null);
+      setUploadError(null);
+      return;
+    }
+    startScanning(facingMode);
+    return () => {
+      stopReader();
+    };
+  }, [open, startScanning, stopReader, facingMode]);
+
+  const handleFlipCamera = async () => {
+    if (isFlipping || isInitializing) return;
+    setIsFlipping(true);
+    const newFacing = facingMode === "environment" ? "user" : "environment";
+    setFacingMode(newFacing);
+    stopReader();
+    await new Promise((r) => setTimeout(r, 300));
+    await startScanning(newFacing);
+    setIsFlipping(false);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError(null);
+    setUploadProcessing(true);
+
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = (ev) => resolve(ev.target?.result as string);
+        fr.onerror = reject;
+        fr.readAsDataURL(file);
+      });
+
+      const imgEl = document.createElement("img");
+      imgEl.src = dataUrl;
+
+      await new Promise<void>((resolve, reject) => {
+        imgEl.onload = () => resolve();
+        imgEl.onerror = () => reject(new Error("Failed to load image"));
+      });
+
+      const uploadReader = new BrowserMultiFormatReader();
+      try {
+        const result = await uploadReader.decodeFromImageElement(imgEl);
+        handleBarcodeResult(result.getText());
+      } catch {
+        setUploadError("No barcode found in image. Try a clearer photo.");
+      } finally {
+        uploadReader.reset();
+      }
+    } catch {
+      setUploadError("Failed to read image file.");
+    } finally {
+      setUploadProcessing(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent
+        data-ocid="barcode_input_scanner.dialog"
+        className="bg-card border-border max-w-sm p-0 overflow-hidden"
+      >
+        <DialogHeader className="px-4 pt-4 pb-2">
+          <DialogTitle className="flex items-center gap-2 text-primary">
+            <Camera className="w-5 h-5" />
+            Scan Barcode
+          </DialogTitle>
+        </DialogHeader>
+
+        {/* LIVE CAMERA — always shown */}
+        <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+            style={{ display: cameraError ? "none" : "block" }}
+          />
+
+          {!cameraError && !isInitializing && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="relative w-56 h-40">
+                <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
+                <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
+                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
+                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
+                <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
+              </div>
+            </div>
+          )}
+
+          {isInitializing && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3">
+              <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm text-muted-foreground">Starting camera…</p>
+            </div>
+          )}
+
+          {cameraError && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center">
+              <X className="w-10 h-10 text-destructive" />
+              <p className="text-sm text-destructive font-medium">
+                {cameraError}
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border mt-1"
+                onClick={() => {
+                  setCameraError(null);
+                  startScanning(facingMode);
+                }}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
+        </div>
+
+        <div className="p-3 flex items-center justify-between bg-card border-b border-border">
+          <p className="text-xs text-muted-foreground">
+            Point camera at barcode
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isFlipping || isInitializing || !!cameraError}
+            onClick={handleFlipCamera}
+            className="border-border text-xs gap-1.5"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            Flip Camera
+          </Button>
+        </div>
+
+        {/* UPLOAD SECTION — always visible below camera */}
+        <div className="p-3 space-y-2">
+          <p className="text-xs text-muted-foreground font-medium">
+            Or upload a barcode image:
+          </p>
+          <button
+            type="button"
+            className="w-full border border-dashed border-border rounded-lg p-3 flex items-center gap-3 cursor-pointer hover:border-primary/60 transition-colors bg-transparent text-left"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
+              <Download className="w-5 h-5 text-primary" />
+            </div>
+            <div>
+              <p className="font-semibold text-sm text-foreground">
+                Upload barcode image
+              </p>
+              <p className="text-xs text-muted-foreground">
+                JPG, PNG, WebP supported
+              </p>
+            </div>
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleFileUpload}
+          />
+
+          {uploadProcessing && (
+            <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+              <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              Reading barcode…
+            </div>
+          )}
+
+          {uploadError && (
+            <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg px-3 py-2">
+              <X className="w-4 h-4 shrink-0" />
+              {uploadError}
+            </div>
+          )}
+        </div>
+
+        <div className="px-4 pb-4 pt-0">
+          <Button
+            variant="outline"
+            className="w-full border-border"
+            onClick={onClose}
+          >
+            Close
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// =============================================================================
 // BARCODE SCANNER MODAL
 // =============================================================================
 interface BarcodeScannerModalProps {
@@ -706,7 +1464,6 @@ function BarcodeScannerModal({
   menuItems,
   onAddToCart,
 }: BarcodeScannerModalProps) {
-  const [activeTab, setActiveTab] = useState<"camera" | "upload">("camera");
   const [isInitializing, setIsInitializing] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -759,16 +1516,12 @@ function BarcodeScannerModal({
       isActiveRef.current = true;
 
       try {
-        // Create a fresh reader each time
         const reader = new BrowserMultiFormatReader();
         readerRef.current = reader;
 
-        // List devices using instance method
         const devices = await reader.listVideoInputDevices();
-        // Pick best device based on facing mode
         let deviceId: string | null = null;
         if (devices.length > 1) {
-          // Try to find the back/front camera by label
           const keyword = facing === "environment" ? "back" : "front";
           const matched = devices.find((d) =>
             d.label.toLowerCase().includes(keyword),
@@ -776,7 +1529,6 @@ function BarcodeScannerModal({
           if (matched) {
             deviceId = matched.deviceId;
           } else {
-            // Fallback: use last device for environment (usually back), first for user (front)
             deviceId =
               facing === "environment"
                 ? devices[devices.length - 1].deviceId
@@ -785,7 +1537,6 @@ function BarcodeScannerModal({
         } else if (devices.length === 1) {
           deviceId = devices[0].deviceId;
         }
-        // null = browser default (ZXing will use facingMode: environment by default)
 
         await reader.decodeFromVideoDevice(
           deviceId,
@@ -796,7 +1547,6 @@ function BarcodeScannerModal({
               handleBarcodeResult(result.getText());
             }
             if (err && !(err instanceof NotFoundException)) {
-              // Only log unexpected errors
               console.debug("ZXing decode error:", err);
             }
           },
@@ -832,24 +1582,19 @@ function BarcodeScannerModal({
     [handleBarcodeResult],
   );
 
-  // Start/stop scanning when modal opens/closes or tab changes
+  // Start scanning automatically when modal opens
   useEffect(() => {
     if (!open) {
       stopReader();
       setCameraError(null);
       setUploadError(null);
-      setActiveTab("camera");
       return;
     }
-    if (activeTab === "camera") {
-      startScanning(facingMode);
-    } else {
-      stopReader();
-    }
+    startScanning(facingMode);
     return () => {
       stopReader();
     };
-  }, [open, activeTab, startScanning, stopReader, facingMode]);
+  }, [open, startScanning, stopReader, facingMode]);
 
   const handleFlipCamera = async () => {
     if (isFlipping || isInitializing) return;
@@ -897,7 +1642,6 @@ function BarcodeScannerModal({
       setUploadError("Failed to read image file.");
     } finally {
       setUploadProcessing(false);
-      // Reset input so same file can be re-selected
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
@@ -910,183 +1654,142 @@ function BarcodeScannerModal({
         data-ocid="scanner.dialog"
         className="bg-card border-border max-w-sm p-0 overflow-hidden"
       >
-        <DialogHeader className="px-4 pt-4 pb-0">
+        <DialogHeader className="px-4 pt-4 pb-2">
           <DialogTitle className="flex items-center gap-2 text-primary">
             <Camera className="w-5 h-5" />
             Barcode Scanner
           </DialogTitle>
         </DialogHeader>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={(v) => setActiveTab(v as "camera" | "upload")}
-          className="w-full"
-        >
-          <TabsList className="w-full rounded-none border-b border-border bg-secondary h-10">
-            <TabsTrigger
-              data-ocid="scanner.camera.tab"
-              value="camera"
-              className="flex-1 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
-            >
-              <Camera className="w-4 h-4 mr-1.5" />
-              Live Camera
-            </TabsTrigger>
-            <TabsTrigger
-              data-ocid="scanner.upload.tab"
-              value="upload"
-              className="flex-1 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
-            >
-              <Download className="w-4 h-4 mr-1.5" />
-              Upload Image
-            </TabsTrigger>
-          </TabsList>
+        {/* LIVE CAMERA — always shown */}
+        <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+            style={{ display: cameraError ? "none" : "block" }}
+          />
 
-          {/* LIVE CAMERA TAB */}
-          <TabsContent value="camera" className="m-0">
-            <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
-              {/* Video element */}
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-                style={{ display: cameraError ? "none" : "block" }}
-              />
-
-              {/* Green scanning frame overlay */}
-              {!cameraError && !isInitializing && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="relative w-56 h-40">
-                    {/* Corner pieces */}
-                    <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
-                    <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
-                    <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
-                    <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
-                    {/* Scanning line animation */}
-                    <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
-                  </div>
-                </div>
-              )}
-
-              {/* Loading state */}
-              {isInitializing && (
-                <div
-                  data-ocid="scanner.camera.loading_state"
-                  className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3"
-                >
-                  <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-                  <p className="text-sm text-muted-foreground">
-                    Starting camera…
-                  </p>
-                </div>
-              )}
-
-              {/* Error state */}
-              {cameraError && (
-                <div
-                  data-ocid="scanner.camera.error_state"
-                  className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center"
-                >
-                  <X className="w-10 h-10 text-destructive" />
-                  <p className="text-sm text-destructive font-medium">
-                    {cameraError}
-                  </p>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-border mt-1"
-                    onClick={() => {
-                      setCameraError(null);
-                      startScanning(facingMode);
-                    }}
-                  >
-                    Retry
-                  </Button>
-                </div>
-              )}
+          {!cameraError && !isInitializing && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="relative w-56 h-40">
+                <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
+                <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
+                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
+                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
+                <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
+              </div>
             </div>
+          )}
 
-            {/* Camera controls */}
-            <div className="p-3 flex items-center justify-between bg-card">
-              <p className="text-xs text-muted-foreground">
-                Point camera at barcode
+          {isInitializing && (
+            <div
+              data-ocid="scanner.camera.loading_state"
+              className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3"
+            >
+              <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm text-muted-foreground">Starting camera…</p>
+            </div>
+          )}
+
+          {cameraError && (
+            <div
+              data-ocid="scanner.camera.error_state"
+              className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center"
+            >
+              <X className="w-10 h-10 text-destructive" />
+              <p className="text-sm text-destructive font-medium">
+                {cameraError}
               </p>
               <Button
-                data-ocid="scanner.flip_camera.button"
-                variant="outline"
                 size="sm"
-                disabled={isFlipping || isInitializing || !!cameraError}
-                onClick={handleFlipCamera}
-                className="border-border text-xs gap-1.5"
+                variant="outline"
+                className="border-border mt-1"
+                onClick={() => {
+                  setCameraError(null);
+                  startScanning(facingMode);
+                }}
               >
-                <Camera className="w-3.5 h-3.5" />
-                Flip Camera
+                Retry
               </Button>
             </div>
-          </TabsContent>
+          )}
+        </div>
 
-          {/* UPLOAD IMAGE TAB */}
-          <TabsContent value="upload" className="m-0">
-            <div className="p-4 space-y-4">
-              <button
-                type="button"
-                data-ocid="scanner.upload.dropzone"
-                className="w-full border-2 border-dashed border-border rounded-xl p-8 flex flex-col items-center justify-center gap-3 cursor-pointer hover:border-primary/60 transition-colors bg-transparent"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <div className="w-14 h-14 rounded-full bg-secondary flex items-center justify-center">
-                  <Download className="w-7 h-7 text-primary" />
-                </div>
-                <div className="text-center">
-                  <p className="font-semibold text-sm text-foreground">
-                    Upload barcode image
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    JPG, PNG, WebP supported
-                  </p>
-                </div>
-                <span
-                  data-ocid="scanner.upload.button"
-                  className="inline-flex items-center justify-center rounded-md border border-border px-3 py-1.5 text-sm font-medium text-foreground pointer-events-none"
-                >
-                  Choose File
-                </span>
-              </button>
+        {/* Camera controls */}
+        <div className="p-3 flex items-center justify-between bg-card border-b border-border">
+          <p className="text-xs text-muted-foreground">
+            Point camera at barcode
+          </p>
+          <Button
+            data-ocid="scanner.flip_camera.button"
+            variant="outline"
+            size="sm"
+            disabled={isFlipping || isInitializing || !!cameraError}
+            onClick={handleFlipCamera}
+            className="border-border text-xs gap-1.5"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            Flip Camera
+          </Button>
+        </div>
 
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={handleFileUpload}
-                data-ocid="scanner.file.input"
-              />
-
-              {uploadProcessing && (
-                <div
-                  data-ocid="scanner.upload.loading_state"
-                  className="flex items-center justify-center gap-2 py-3 text-sm text-muted-foreground"
-                >
-                  <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                  Reading barcode…
-                </div>
-              )}
-
-              {uploadError && (
-                <div
-                  data-ocid="scanner.upload.error_state"
-                  className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg px-3 py-2"
-                >
-                  <X className="w-4 h-4 shrink-0" />
-                  {uploadError}
-                </div>
-              )}
+        {/* UPLOAD SECTION — always visible below camera */}
+        <div className="p-3 space-y-2">
+          <p className="text-xs text-muted-foreground font-medium">
+            Or upload a barcode image:
+          </p>
+          <button
+            type="button"
+            data-ocid="scanner.upload.dropzone"
+            className="w-full border border-dashed border-border rounded-lg p-3 flex items-center gap-3 cursor-pointer hover:border-primary/60 transition-colors bg-transparent text-left"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
+              <Download className="w-5 h-5 text-primary" />
             </div>
-          </TabsContent>
-        </Tabs>
+            <div>
+              <p className="font-semibold text-sm text-foreground">
+                Upload barcode image
+              </p>
+              <p className="text-xs text-muted-foreground">
+                JPG, PNG, WebP supported
+              </p>
+            </div>
+          </button>
 
-        {/* Close button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleFileUpload}
+            data-ocid="scanner.file.input"
+          />
+
+          {uploadProcessing && (
+            <div
+              data-ocid="scanner.upload.loading_state"
+              className="flex items-center gap-2 py-2 text-sm text-muted-foreground"
+            >
+              <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              Reading barcode…
+            </div>
+          )}
+
+          {uploadError && (
+            <div
+              data-ocid="scanner.upload.error_state"
+              className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg px-3 py-2"
+            >
+              <X className="w-4 h-4 shrink-0" />
+              {uploadError}
+            </div>
+          )}
+        </div>
+
         <div className="px-4 pb-4 pt-0">
           <Button
             data-ocid="scanner.close.button"
@@ -1108,7 +1811,7 @@ function BarcodeScannerModal({
 interface BillingPageProps {
   menuItems: MenuItem[];
   settings: AppSettings;
-  onOrderComplete: (order: Order) => void;
+  onOrderComplete: (order: Order) => Promise<void>;
 }
 
 function BillingPage({
@@ -1121,6 +1824,7 @@ function BillingPage({
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discount, setDiscount] = useState<number>(0);
   const [customerName, setCustomerName] = useState("");
+  const [customerPhone, setCustomerPhone] = useState("");
   const [paymentMode, setPaymentMode] = useState<"cash" | "qr" | "">("");
   const [cashAmount, setCashAmount] = useState<number>(0);
   const [validationError, setValidationError] = useState("");
@@ -1128,7 +1832,9 @@ function BillingPage({
   const [completedOrder, setCompletedOrder] = useState<Order | null>(null);
   const [showBillModal, setShowBillModal] = useState(false);
   const [showCameraModal, setShowCameraModal] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   const [postPayment, setPostPayment] = useState(false);
+  const [billQrDataUrl, setBillQrDataUrl] = useState<string>("");
   const searchRef = useRef<HTMLInputElement>(null);
   const barcodeBuffer = useRef<string>("");
   const barcodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1226,12 +1932,7 @@ function BillingPage({
     setCart((prev) => prev.filter((c) => c.menuItemId !== menuItemId));
   };
 
-  const handlePayNow = () => {
-    if (!customerName.trim()) {
-      setValidationError("Customer Name is required");
-      setShowValidation(true);
-      return;
-    }
+  const handlePayNow = async () => {
     if (!paymentMode) {
       setValidationError("Please select a Payment Mode");
       setShowValidation(true);
@@ -1253,7 +1954,8 @@ function BillingPage({
     const order: Order = {
       id: Date.now().toString(),
       orderNo: counter,
-      customerName: customerName.trim(),
+      customerName: customerName.trim() || "Walk-in Customer",
+      customerPhone: customerPhone.trim() || undefined,
       paymentMode: paymentMode as "cash" | "qr",
       cashAmount: paymentMode === "cash" ? cashAmount : 0,
       items: [...cart],
@@ -1263,6 +1965,20 @@ function BillingPage({
       timestamp: now.toISOString(),
       date: now.toISOString().split("T")[0],
     };
+
+    // Generate UPI QR code
+    if (settings.upiId) {
+      try {
+        const upiString = `upi://pay?pa=${encodeURIComponent(settings.upiId)}&pn=${encodeURIComponent(settings.shopName)}&am=${order.total}&cu=INR`;
+        const qrUrl = await QRCode.toDataURL(upiString, {
+          width: 200,
+          margin: 1,
+        });
+        setBillQrDataUrl(qrUrl);
+      } catch {
+        setBillQrDataUrl("");
+      }
+    }
 
     onOrderComplete(order);
     saveLS(LS_ORDER_COUNTER, counter + 1);
@@ -1275,38 +1991,140 @@ function BillingPage({
     setCart([]);
     setDiscount(0);
     setCustomerName("");
+    setCustomerPhone("");
     setPaymentMode("");
     setCashAmount(0);
     setCompletedOrder(null);
     setPostPayment(false);
     setShowBillModal(false);
+    setShowShareDialog(false);
+    setBillQrDataUrl("");
     toast.success("Order completed! Screen reset.");
   };
 
   const handlePrintBill = () => {
+    // Set a flag so CSS knows we're printing the bill specifically
+    document.body.setAttribute("data-printing-bill", "true");
     window.print();
+    // Remove flag after print dialog closes
+    setTimeout(() => {
+      document.body.removeAttribute("data-printing-bill");
+    }, 1000);
   };
 
   const handleDownloadBill = async () => {
-    const target = document.getElementById("bill-download-target");
-    if (!target) return;
+    if (!completedOrder) return;
     try {
       const { toPng } = await import("html-to-image");
-      const dataUrl = await toPng(target, {
+
+      // Create a fresh off-screen container with all needed styles
+      const container = document.createElement("div");
+      container.style.cssText = `
+        position: fixed;
+        left: -9999px;
+        top: 0;
+        width: 380px;
+        background: #ffffff;
+        padding: 24px;
+        font-family: 'Courier New', Courier, monospace;
+        color: #000000;
+        font-size: 14px;
+        line-height: 1.4;
+        z-index: -1;
+      `;
+      document.body.appendChild(container);
+
+      // Render bill HTML as a simple string to avoid React portal issues
+      const orderData = completedOrder;
+      const s = settings;
+      const balance2 =
+        orderData.paymentMode === "cash"
+          ? Math.max(0, orderData.cashAmount - orderData.total)
+          : 0;
+      const itemRows = orderData.items
+        .map(
+          (item) =>
+            `<div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;margin-bottom:2px;">
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
+              <span style="text-align:center;">${item.qty}</span>
+              <span style="text-align:right;">₹${item.mrp}</span>
+              <span style="text-align:right;">₹${item.qty * item.mrp}</span>
+            </div>`,
+        )
+        .join("");
+
+      container.innerHTML = `
+        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:14px;padding:8px;">
+          ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
+          <div style="text-align:center;margin-bottom:6px;">
+            <p style="font-weight:bold;font-size:16px;margin:0;">${s.shopName}</p>
+            ${s.contact ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
+            ${s.address ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
+          </div>
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="font-size:12px;">
+            <div style="display:flex;justify-content:space-between;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
+            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Time:</span><span>${new Date(orderData.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })}</span></div>
+          </div>
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;font-weight:bold;color:#555;margin-bottom:4px;">
+            <span>Item</span><span style="text-align:center;">Qty</span><span style="text-align:right;">MRP</span><span style="text-align:right;">Amt</span>
+          </div>
+          ${itemRows}
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="font-size:12px;">
+            <div style="display:flex;justify-content:space-between;"><span>Subtotal:</span><span>₹${orderData.subtotal.toFixed(2)}</span></div>
+            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Discount:</span><span>- ₹${orderData.discount.toFixed(2)}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:16px;"><span>TOTAL:</span><span>₹${orderData.total.toFixed(2)}</span></div>
+          </div>
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="font-size:12px;">
+            <div style="display:flex;justify-content:space-between;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
+            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Cash Paid:</span><span>₹${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
+            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>₹${balance2.toFixed(2)}</span></div>` : ""}
+            ${s.gstinEnabled && s.gstin ? `<div style="display:flex;justify-content:space-between;"><span>GSTIN:</span><span>${s.gstin}</span></div>` : ""}
+          </div>
+          ${
+            s.showQrOnBill && billQrDataUrl
+              ? `
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="text-align:center;padding:8px 0;">
+            <p style="font-size:11px;color:#666;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
+            <img src="${billQrDataUrl}" style="width:120px;height:120px;" />
+            <p style="font-size:11px;color:#666;margin:4px 0 0 0;">${s.upiId}</p>
+          </div>`
+              : ""
+          }
+          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
+          <div style="text-align:center;font-size:13px;">
+            <p style="font-weight:bold;margin:4px 0;">Thank You!</p>
+            <p style="margin:2px 0;">Visit Again, Come Again!</p>
+            <hr style="border:none;border-top:1px solid #ccc;margin:6px 0;" />
+            <p style="font-weight:600;margin:2px 0;">Powered By Medwin Techs Thanjavur</p>
+            <p style="opacity:0.5;font-size:10px;margin:2px 0;">medwin2105@gmail.com</p>
+          </div>
+        </div>
+      `;
+
+      // Wait for images to load
+      await new Promise((r) => setTimeout(r, 300));
+
+      const dataUrl = await toPng(container, {
         backgroundColor: "#ffffff",
         pixelRatio: 2,
-        skipFonts: true,
-        style: {
-          display: "block",
-          position: "static",
-          left: "0",
-          top: "0",
-        },
       });
+
+      document.body.removeChild(container);
+
       const a = document.createElement("a");
       a.href = dataUrl;
-      a.download = `bill-${completedOrder?.orderNo || "order"}.png`;
+      a.download = `bill-${orderData.orderNo}.png`;
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       toast.success("Bill downloaded!");
     } catch (err) {
       toast.error("Download failed. Try again.");
@@ -1593,14 +2411,31 @@ function BillingPage({
 
           <div>
             <Label htmlFor="customer-name" className="text-base mb-2 block">
-              Customer Name <span className="text-destructive">*</span>
+              Customer Name{" "}
+              <span className="text-muted-foreground text-sm">(optional)</span>
             </Label>
             <Input
               id="customer-name"
               data-ocid="billing.customer_name.input"
               value={customerName}
               onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Enter customer name"
+              placeholder="Walk-in Customer (optional)"
+              className="input-large bg-secondary border-border"
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="customer-phone" className="text-base mb-2 block">
+              Customer Number{" "}
+              <span className="text-muted-foreground text-sm">(optional)</span>
+            </Label>
+            <Input
+              id="customer-phone"
+              data-ocid="billing.customer_phone.input"
+              type="tel"
+              value={customerPhone}
+              onChange={(e) => setCustomerPhone(e.target.value)}
+              placeholder="e.g. 9876543210"
               className="input-large bg-secondary border-border"
             />
           </div>
@@ -1691,6 +2526,15 @@ function BillingPage({
               Download Bill
             </Button>
             <Button
+              data-ocid="billing.share_bill.button"
+              onClick={() => setShowShareDialog(true)}
+              variant="outline"
+              className="border-border h-12 text-base text-green-400 hover:text-green-300 hover:border-green-500"
+            >
+              <Share2 className="w-5 h-5 mr-2" />
+              Share Bill
+            </Button>
+            <Button
               data-ocid="billing.back.button"
               onClick={() => {
                 setShowBillModal(true);
@@ -1704,7 +2548,7 @@ function BillingPage({
             <Button
               data-ocid="billing.done_order.button"
               onClick={handleDoneOrder}
-              className="bg-green-600 hover:bg-green-700 text-white h-12 text-base font-bold"
+              className="bg-green-600 hover:bg-green-700 text-white h-12 text-base font-bold col-span-2"
             >
               <CheckCircle className="w-5 h-5 mr-2" />
               Done & Close
@@ -1713,45 +2557,93 @@ function BillingPage({
         </div>
       )}
 
-      {/* BILL MODAL (dark) */}
+      {/* BILL MODAL (white background, black text for print-accurate preview) */}
       {completedOrder && (
         <Dialog open={showBillModal} onOpenChange={setShowBillModal}>
           <DialogContent
             data-ocid="billing.bill_modal.modal"
-            className="bg-black border-gray-700 max-w-sm max-h-[90vh] overflow-y-auto p-0"
+            className="bg-white border-gray-300 max-w-sm max-h-[90vh] overflow-y-auto p-0"
           >
-            <div className="sticky top-0 bg-black border-b border-gray-700 p-4 flex items-center justify-between z-10">
-              <span className="font-bold text-white">Bill Preview</span>
+            {/* Header */}
+            <div className="sticky top-0 bg-white border-b border-gray-300 px-4 py-3 flex items-center justify-between z-10">
+              <span className="font-bold text-black text-base">
+                Bill Preview
+              </span>
               <Button
                 data-ocid="billing.bill_modal.close_button"
                 variant="ghost"
                 size="icon"
-                className="text-white hover:bg-gray-800"
+                className="text-black hover:bg-gray-100"
                 onClick={() => setShowBillModal(false)}
               >
                 <X className="w-5 h-5" />
               </Button>
             </div>
-            <div className="p-4">
+
+            {/* Bill content — always white bg, black text */}
+            <div className="p-4 bg-white">
               <BillContent
                 order={completedOrder}
                 settings={settings}
-                darkMode={true}
+                darkMode={false}
+                qrDataUrl={billQrDataUrl}
               />
+            </div>
+
+            {/* Action buttons at the bottom of the modal */}
+            <div className="sticky bottom-0 bg-white border-t border-gray-300 p-3 grid grid-cols-2 gap-2">
+              <Button
+                data-ocid="billing.bill_modal.print_button"
+                onClick={handlePrintBill}
+                variant="outline"
+                className="border-gray-400 text-black hover:bg-gray-100 font-semibold h-11"
+              >
+                <Printer className="w-4 h-4 mr-2" />
+                Print Bill
+              </Button>
+              <Button
+                data-ocid="billing.bill_modal.download_button"
+                onClick={handleDownloadBill}
+                variant="outline"
+                className="border-gray-400 text-black hover:bg-gray-100 font-semibold h-11"
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Download Bill
+              </Button>
+              <Button
+                data-ocid="billing.bill_modal.share_button"
+                onClick={() => setShowShareDialog(true)}
+                variant="outline"
+                className="border-green-500 text-green-700 hover:bg-green-50 font-semibold h-11"
+              >
+                <Share2 className="w-4 h-4 mr-2" />
+                Share Bill
+              </Button>
+              <Button
+                data-ocid="billing.bill_modal.done_button"
+                onClick={handleDoneOrder}
+                className="bg-green-600 hover:bg-green-700 text-white font-bold h-11"
+              >
+                <CheckCircle className="w-4 h-4 mr-2" />
+                Done & Close
+              </Button>
             </div>
           </DialogContent>
         </Dialog>
       )}
 
-      {/* PRINT AREA (visually hidden, shown during print via CSS) */}
+      {/* PRINT AREA — hidden on screen, shown only during print via @media print */}
       <div
         id="bill-print-area"
+        aria-hidden="true"
         style={{
-          position: "fixed",
+          position: "absolute",
           left: "-9999px",
           top: 0,
           width: "380px",
           background: "#ffffff",
+          overflow: "hidden",
+          pointerEvents: "none",
         }}
       >
         {completedOrder && (
@@ -1759,28 +2651,7 @@ function BillingPage({
             order={completedOrder}
             settings={settings}
             darkMode={false}
-          />
-        )}
-      </div>
-
-      {/* DOWNLOAD TARGET (visually hidden but properly sized for html-to-image) */}
-      <div
-        id="bill-download-target"
-        style={{
-          position: "fixed",
-          left: "-9999px",
-          top: 0,
-          width: "380px",
-          background: "#ffffff",
-          padding: "24px",
-          fontFamily: "'Courier New', Courier, monospace",
-        }}
-      >
-        {completedOrder && (
-          <BillContent
-            order={completedOrder}
-            settings={settings}
-            darkMode={false}
+            qrDataUrl={billQrDataUrl}
           />
         )}
       </div>
@@ -1792,6 +2663,17 @@ function BillingPage({
         menuItems={menuItems}
         onAddToCart={addToCart}
       />
+
+      {/* SHARE BILL DIALOG */}
+      {completedOrder && (
+        <ShareBillDialog
+          open={showShareDialog}
+          onClose={() => setShowShareDialog(false)}
+          order={completedOrder}
+          settings={settings}
+          billQrDataUrl={billQrDataUrl}
+        />
+      )}
 
       {/* VALIDATION DIALOG */}
       <AlertDialog open={showValidation} onOpenChange={setShowValidation}>
@@ -1825,7 +2707,7 @@ function BillingPage({
 // =============================================================================
 interface ManageMenuPageProps {
   menuItems: MenuItem[];
-  setMenuItems: (items: MenuItem[]) => void;
+  setMenuItems: (items: MenuItem[]) => Promise<void>;
 }
 
 function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
@@ -1841,6 +2723,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
   });
   const [imageMode, setImageMode] = useState<"upload" | "url">("upload");
   const [imageUrl, setImageUrl] = useState("");
+  const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
 
   const openAdd = () => {
     setForm({
@@ -1877,7 +2760,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
     reader.readAsDataURL(file);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name?.trim()) {
       toast.error("Item name is required");
       return;
@@ -1896,7 +2779,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
           ? { ...m, ...form, imageBase64: imageToUse, id: m.id }
           : m,
       );
-      setMenuItems(updated);
+      await setMenuItems(updated);
       toast.success("Item updated!");
     } else {
       const newItem: MenuItem = {
@@ -1907,14 +2790,14 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
         barcodeEnabled: form.barcodeEnabled ?? true,
         imageBase64: imageToUse,
       };
-      setMenuItems([...menuItems, newItem]);
+      await setMenuItems([...menuItems, newItem]);
       toast.success("Item added!");
     }
     setShowAddDialog(false);
   };
 
-  const handleDelete = (id: string) => {
-    setMenuItems(menuItems.filter((m) => m.id !== id));
+  const handleDelete = async (id: string) => {
+    await setMenuItems(menuItems.filter((m) => m.id !== id));
     toast.success("Item deleted");
     setDeleteId(null);
   };
@@ -2034,13 +2917,32 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
             </div>
             <div>
               <Label className="text-base mb-2 block">Barcode</Label>
-              <Input
-                data-ocid="menu.barcode.input"
-                value={form.barcode || ""}
-                onChange={(e) => setForm({ ...form, barcode: e.target.value })}
-                placeholder="Enter barcode number"
-                className="input-large bg-secondary border-border"
-              />
+              <div className="flex gap-2">
+                <Input
+                  data-ocid="menu.barcode.input"
+                  value={form.barcode || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, barcode: e.target.value })
+                  }
+                  placeholder="Enter or scan barcode"
+                  className="input-large bg-secondary border-border flex-1"
+                />
+                <Button
+                  type="button"
+                  data-ocid="menu.scan_barcode.button"
+                  variant="outline"
+                  size="icon"
+                  className="w-14 h-14 border-border bg-secondary shrink-0"
+                  onClick={() => setShowBarcodeScanner(true)}
+                  aria-label="Scan barcode"
+                  title="Scan barcode with camera"
+                >
+                  <Camera className="w-5 h-5" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Type barcode or tap the camera icon to scan
+              </p>
             </div>
             <div className="flex items-center gap-3">
               <Switch
@@ -2107,7 +3009,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
                 />
               )}
               {(form.imageBase64 || imageUrl) && (
-                <div className="mt-2">
+                <div className="mt-2 flex items-center gap-3">
                   <img
                     src={form.imageBase64 || imageUrl}
                     alt="Preview"
@@ -2116,6 +3018,19 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
                       (e.target as HTMLImageElement).style.display = "none";
                     }}
                   />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    data-ocid="menu.remove_image.button"
+                    onClick={() => {
+                      setForm({ ...form, imageBase64: "" });
+                      setImageUrl("");
+                    }}
+                  >
+                    <Trash2 className="w-3 h-3 mr-1" />
+                    Remove Image
+                  </Button>
                 </div>
               )}
             </div>
@@ -2138,6 +3053,13 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Barcode Scanner for barcode input field */}
+      <BarcodeScannerForInput
+        open={showBarcodeScanner}
+        onClose={() => setShowBarcodeScanner(false)}
+        onResult={(barcode) => setForm((prev) => ({ ...prev, barcode }))}
+      />
 
       {/* Delete Confirm */}
       <AlertDialog
@@ -2176,7 +3098,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
 // =============================================================================
 interface SalesReportPageProps {
   orders: Order[];
-  setOrders: (orders: Order[]) => void;
+  setOrders: (orders: Order[]) => Promise<void>;
 }
 
 function SalesReportPage({ orders, setOrders }: SalesReportPageProps) {
@@ -2270,8 +3192,8 @@ function SalesReportPage({ orders, setOrders }: SalesReportPageProps) {
     setConfirmRestart(false);
   };
 
-  const handleClearAll = () => {
-    setOrders([]);
+  const handleClearAll = async () => {
+    await setOrders([]);
     toast.success("All reports cleared");
     setConfirmClear(false);
   };
@@ -2655,7 +3577,7 @@ function CustomerDetailsPage({ orders }: CustomerDetailsPageProps) {
 // =============================================================================
 interface SettingsPageProps {
   settings: AppSettings;
-  setSettings: (s: AppSettings) => void;
+  setSettings: (s: AppSettings) => Promise<void>;
 }
 
 function SettingsPage({ settings, setSettings }: SettingsPageProps) {
@@ -2686,8 +3608,8 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
     reader.readAsDataURL(file);
   };
 
-  const handleSave = () => {
-    setSettings(form);
+  const handleSave = async () => {
+    await setSettings(form);
     document.title = form.websiteName;
     toast.success("Settings saved!");
   };
@@ -2821,6 +3743,21 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           />
         </div>
 
+        {/* Show QR on Bill toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-semibold text-base">Show QR Code on Bill</p>
+            <p className="text-sm text-muted-foreground">
+              Display UPI payment QR on printed/downloaded bills
+            </p>
+          </div>
+          <Switch
+            data-ocid="settings.show_qr_on_bill.toggle"
+            checked={form.showQrOnBill ?? true}
+            onCheckedChange={(v) => setForm({ ...form, showQrOnBill: v })}
+          />
+        </div>
+
         <Separator className="bg-border" />
 
         {/* 9. Show Tax */}
@@ -2935,28 +3872,43 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
 // =============================================================================
 interface ManageUsersPageProps {
   users: User[];
-  setUsers: (users: User[]) => void;
+  setUsers: (users: User[]) => Promise<void>;
 }
+
+const ROLE_COLORS: Record<UserRole, string> = {
+  admin: "bg-blue-600 text-white",
+  manager: "bg-amber-600 text-white",
+  cashier: "bg-green-600 text-white",
+  accountant: "bg-purple-600 text-white",
+};
 
 function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
   const [showDialog, setShowDialog] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
-  const [form, setForm] = useState({ username: "", password: "" });
+  const [form, setForm] = useState<{
+    username: string;
+    password: string;
+    role: UserRole;
+  }>({ username: "", password: "", role: "cashier" });
 
   const openAdd = () => {
-    setForm({ username: "", password: "" });
+    setForm({ username: "", password: "", role: "cashier" });
     setEditingUser(null);
     setShowDialog(true);
   };
 
   const openEdit = (user: User) => {
-    setForm({ username: user.username, password: user.password });
+    setForm({
+      username: user.username,
+      password: user.password,
+      role: user.role || "cashier",
+    });
     setEditingUser(user);
     setShowDialog(true);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.username.trim()) {
       toast.error("Username is required");
       return;
@@ -2967,10 +3919,15 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
     }
 
     if (editingUser) {
-      setUsers(
+      await setUsers(
         users.map((u) =>
           u.id === editingUser.id
-            ? { ...u, username: form.username.trim(), password: form.password }
+            ? {
+                ...u,
+                username: form.username.trim(),
+                password: form.password,
+                role: form.role,
+              }
             : u,
         ),
       );
@@ -2981,12 +3938,13 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
         toast.error("Username already exists");
         return;
       }
-      setUsers([
+      await setUsers([
         ...users,
         {
           id: Date.now().toString(),
           username: form.username.trim(),
           password: form.password,
+          role: form.role,
         },
       ]);
       toast.success("User added!");
@@ -2994,13 +3952,13 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
     setShowDialog(false);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (users.length <= 1) {
       toast.error("Cannot delete the last user");
       setDeleteId(null);
       return;
     }
-    setUsers(users.filter((u) => u.id !== id));
+    await setUsers(users.filter((u) => u.id !== id));
     toast.success("User deleted");
     setDeleteId(null);
   };
@@ -3025,6 +3983,7 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
             <TableRow className="border-border">
               <TableHead>#</TableHead>
               <TableHead>Username</TableHead>
+              <TableHead>Role</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -3035,6 +3994,13 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
                   {idx + 1}
                 </TableCell>
                 <TableCell className="font-semibold">{user.username}</TableCell>
+                <TableCell>
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold capitalize ${ROLE_COLORS[user.role || "cashier"]}`}
+                  >
+                    {user.role || "cashier"}
+                  </span>
+                </TableCell>
                 <TableCell>
                   <div className="flex gap-2">
                     <Button
@@ -3095,6 +4061,43 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
                 className="input-large bg-secondary border-border"
               />
             </div>
+            <div>
+              <Label className="text-base mb-2 block">Role</Label>
+              <Select
+                value={form.role}
+                onValueChange={(v) => setForm({ ...form, role: v as UserRole })}
+              >
+                <SelectTrigger
+                  data-ocid="users.role.select"
+                  className="input-large bg-secondary border-border"
+                >
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border">
+                  <SelectItem value="admin">Admin (Full Access)</SelectItem>
+                  <SelectItem value="manager">Manager</SelectItem>
+                  <SelectItem value="cashier">Cashier</SelectItem>
+                  <SelectItem value="accountant">Accountant</SelectItem>
+                </SelectContent>
+              </Select>
+              <div className="mt-2 text-xs text-muted-foreground space-y-0.5">
+                <p>
+                  <span className="font-semibold">Admin:</span> All pages (full
+                  CRUD)
+                </p>
+                <p>
+                  <span className="font-semibold">Manager:</span> Billing, Menu,
+                  Reports, Customers
+                </p>
+                <p>
+                  <span className="font-semibold">Cashier:</span> Billing only
+                </p>
+                <p>
+                  <span className="font-semibold">Accountant:</span> Billing,
+                  Reports, Customers
+                </p>
+              </div>
+            </div>
           </div>
           <DialogFooter className="gap-2">
             <Button
@@ -3145,18 +4148,115 @@ function ManageUsersPage({ users, setUsers }: ManageUsersPageProps) {
 }
 
 // =============================================================================
+// HELPERS: backend <-> local type conversion
+// =============================================================================
+type BackendOrder = import("./backend").Order;
+type BackendMenuItem = import("./backend").MenuItem;
+type BackendCartItem = import("./backend").CartItem;
+type BackendUser = import("./backend").User;
+type BackendSettings = import("./backend").AppSettings;
+
+function toLocalOrder(o: BackendOrder): Order {
+  return {
+    id: o.id,
+    orderNo: Number(o.orderNo),
+    customerName: o.customerName,
+    customerPhone: o.customerPhone || undefined,
+    paymentMode: (o.paymentMode as "cash" | "qr") || "cash",
+    cashAmount: o.cashAmount,
+    items: o.items.map((i: BackendCartItem) => ({
+      menuItemId: i.menuItemId,
+      name: i.name,
+      mrp: i.mrp,
+      qty: Number(i.qty),
+      imageBase64: i.imageBase64,
+    })),
+    discount: o.discount,
+    subtotal: o.subtotal,
+    total: o.total,
+    timestamp: o.timestamp,
+    date: o.date,
+  };
+}
+
+function toBackendOrder(o: Order): BackendOrder {
+  return {
+    id: o.id,
+    orderNo: BigInt(o.orderNo),
+    customerName: o.customerName,
+    customerPhone: o.customerPhone || "",
+    paymentMode: o.paymentMode,
+    cashAmount: o.cashAmount,
+    items: o.items.map((i) => ({
+      menuItemId: i.menuItemId,
+      name: i.name,
+      mrp: i.mrp,
+      qty: BigInt(i.qty),
+      imageBase64: i.imageBase64,
+    })),
+    discount: o.discount,
+    subtotal: o.subtotal,
+    total: o.total,
+    timestamp: o.timestamp,
+    date: o.date,
+  };
+}
+
+function toLocalMenuItem(m: BackendMenuItem): MenuItem {
+  return {
+    id: m.id,
+    name: m.name,
+    mrp: m.mrp,
+    barcode: m.barcode,
+    barcodeEnabled: m.barcodeEnabled,
+    imageBase64: m.imageBase64,
+  };
+}
+
+function toLocalUser(u: BackendUser): User {
+  return {
+    id: u.id,
+    username: u.username,
+    password: u.password,
+    role: (u.role as UserRole) || "cashier",
+  };
+}
+
+function toLocalSettings(s: BackendSettings): AppSettings {
+  return {
+    websiteName: s.websiteName,
+    shopName: s.shopName,
+    contact: s.contact,
+    address: s.address,
+    upiId: s.upiId,
+    qrNote: s.qrNote,
+    showTax: s.showTax,
+    gstin: s.gstin,
+    gstinEnabled: s.gstinEnabled,
+    billLogoBase64: s.billLogoBase64,
+    websiteLogoBase64: s.websiteLogoBase64,
+    showQrOnBill: s.showQrOnBill,
+  };
+}
+
+// =============================================================================
 // MAIN APP
 // =============================================================================
 export default function App() {
+  const { actor, isFetching: actorFetching } = useActor();
+
   // ---------------------------------------------------------------------------
   // AUTH STATE
   // ---------------------------------------------------------------------------
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
     return sessionStorage.getItem(SESSION_KEY);
   });
+  const [currentRole, setCurrentRole] = useState<UserRole>(() => {
+    return (sessionStorage.getItem(SESSION_ROLE_KEY) as UserRole) || "admin";
+  });
 
   // ---------------------------------------------------------------------------
-  // GLOBAL STATE (all loaded from localStorage)
+  // GLOBAL STATE (loaded from backend, fallback to localStorage)
   // ---------------------------------------------------------------------------
   const [settings, setSettingsState] = useState<AppSettings>(() =>
     loadLS(LS_SETTINGS, DEFAULT_SETTINGS),
@@ -3170,6 +4270,7 @@ export default function App() {
   const [orders, setOrdersState] = useState<Order[]>(() =>
     loadLS(LS_ORDERS, []),
   );
+  const [backendLoaded, setBackendLoaded] = useState(false);
 
   const [currentPage, setCurrentPage] = useState<Page>("billing");
   const [navOpen, setNavOpen] = useState(false);
@@ -3180,38 +4281,165 @@ export default function App() {
   }, [settings.websiteName]);
 
   // ---------------------------------------------------------------------------
-  // PERSIST HELPERS
+  // INITIAL LOAD FROM BACKEND
   // ---------------------------------------------------------------------------
-  const setSettings = (s: AppSettings) => {
+  useEffect(() => {
+    if (!actor || actorFetching) return;
+
+    const loadAll = async () => {
+      try {
+        const [beSettings, beUsers, beMenuItems, beOrders] = await Promise.all([
+          actor.getSettings(),
+          actor.getUsers(),
+          actor.getMenuItems(),
+          actor.getOrders(),
+        ]);
+
+        const localSettings = toLocalSettings(beSettings);
+        const localUsers = beUsers.map(toLocalUser);
+        const localMenu = beMenuItems.map(toLocalMenuItem);
+        const localOrders = beOrders.map(toLocalOrder);
+
+        setSettingsState(localSettings);
+        saveLS(LS_SETTINGS, localSettings);
+
+        if (localUsers.length > 0) {
+          setUsersState(localUsers);
+          saveLS(LS_USERS, localUsers);
+        }
+
+        setMenuItemsState(localMenu);
+        saveLS(LS_MENU, localMenu);
+
+        setOrdersState(localOrders);
+        saveLS(LS_ORDERS, localOrders);
+
+        document.title = localSettings.websiteName;
+      } catch (err) {
+        console.error("Backend initial load failed, using localStorage:", err);
+      } finally {
+        setBackendLoaded(true);
+      }
+    };
+
+    loadAll();
+  }, [actor, actorFetching]);
+
+  // ---------------------------------------------------------------------------
+  // POLLING: refresh every 5 seconds
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!actor) return;
+
+    const poll = async () => {
+      try {
+        const [beSettings, beMenuItems, beOrders] = await Promise.all([
+          actor.getSettings(),
+          actor.getMenuItems(),
+          actor.getOrders(),
+        ]);
+
+        const localSettings = toLocalSettings(beSettings);
+        const localMenu = beMenuItems.map(toLocalMenuItem);
+        const localOrders = beOrders.map(toLocalOrder);
+
+        setSettingsState(localSettings);
+        saveLS(LS_SETTINGS, localSettings);
+
+        setMenuItemsState(localMenu);
+        saveLS(LS_MENU, localMenu);
+
+        setOrdersState(localOrders);
+        saveLS(LS_ORDERS, localOrders);
+      } catch {
+        // Silent fail — app keeps running with local state
+      }
+    };
+
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, [actor]);
+
+  // ---------------------------------------------------------------------------
+  // PERSIST HELPERS (write to backend + localStorage)
+  // ---------------------------------------------------------------------------
+  const setSettings = async (s: AppSettings) => {
     setSettingsState(s);
     saveLS(LS_SETTINGS, s);
     document.title = s.websiteName;
+    if (actor) {
+      try {
+        await actor.setSettings(s);
+      } catch {
+        /* silent */
+      }
+    }
   };
 
-  const setUsers = (u: User[]) => {
+  const setUsers = async (u: User[]) => {
     setUsersState(u);
     saveLS(LS_USERS, u);
+    if (actor) {
+      try {
+        await actor.setUsers(
+          u.map((usr) => ({ ...usr, role: usr.role as string })),
+        );
+      } catch {
+        /* silent */
+      }
+    }
   };
 
-  const setMenuItems = (m: MenuItem[]) => {
+  const setMenuItems = async (m: MenuItem[]) => {
     setMenuItemsState(m);
     saveLS(LS_MENU, m);
+    if (actor) {
+      try {
+        await actor.setMenuItems(m);
+      } catch {
+        /* silent */
+      }
+    }
   };
 
-  const setOrders = (o: Order[]) => {
+  const setOrders = async (o: Order[]) => {
     setOrdersState(o);
     saveLS(LS_ORDERS, o);
+    if (actor) {
+      try {
+        await actor.setOrders(o.map(toBackendOrder));
+      } catch {
+        /* silent */
+      }
+    }
   };
 
-  const handleOrderComplete = (order: Order) => {
+  const handleOrderComplete = async (order: Order) => {
     const updated = [order, ...orders];
-    setOrders(updated);
+    setOrdersState(updated);
+    saveLS(LS_ORDERS, updated);
+    if (actor) {
+      try {
+        await actor.addOrder(toBackendOrder(order));
+      } catch {
+        /* silent */
+      }
+    }
   };
 
   const handleLogout = () => {
     sessionStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(SESSION_ROLE_KEY);
     setCurrentUser(null);
+    setCurrentRole("admin");
   };
+
+  // ---------------------------------------------------------------------------
+  // RENDER: LOADING (waiting for initial backend data)
+  // ---------------------------------------------------------------------------
+  if (!backendLoaded && actor && !actorFetching) {
+    // Still loading — show spinner briefly
+  }
 
   // ---------------------------------------------------------------------------
   // RENDER: LOGIN
@@ -3219,17 +4447,30 @@ export default function App() {
   if (!currentUser) {
     return (
       <>
-        <LoginPage onLogin={setCurrentUser} settings={settings} />
+        <LoginPage
+          onLogin={(username, role) => {
+            setCurrentUser(username);
+            setCurrentRole(role);
+          }}
+          settings={settings}
+        />
         <Toaster richColors />
       </>
     );
   }
 
+  const allowedPages = ROLE_PAGES[currentRole] || ROLE_PAGES.cashier;
+
   // ---------------------------------------------------------------------------
   // RENDER: APP SHELL
   // ---------------------------------------------------------------------------
+  // Redirect to billing if current page not allowed for this role
+  const safePage: Page = allowedPages.includes(currentPage)
+    ? currentPage
+    : "billing";
+
   const renderPage = () => {
-    switch (currentPage) {
+    switch (safePage) {
       case "billing":
         return (
           <BillingPage
@@ -3270,6 +4511,7 @@ export default function App() {
       <TopBar
         settings={settings}
         currentUser={currentUser}
+        currentRole={currentRole}
         onMenuOpen={() => setNavOpen(true)}
         onLogout={handleLogout}
       />
@@ -3278,8 +4520,9 @@ export default function App() {
       <SlideNav
         isOpen={navOpen}
         onClose={() => setNavOpen(false)}
-        currentPage={currentPage}
+        currentPage={safePage}
         onNavigate={setCurrentPage}
+        allowedPages={allowedPages}
       />
 
       {/* MAIN CONTENT */}
@@ -3291,7 +4534,7 @@ export default function App() {
               variant="outline"
               className="border-primary text-primary font-semibold"
             >
-              {PAGE_TITLES[currentPage]}
+              {PAGE_TITLES[safePage]}
             </Badge>
           </div>
         </div>

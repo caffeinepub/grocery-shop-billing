@@ -73,26 +73,57 @@
 
 /* Print styles */
 @media print {
-  #root {
+  /* Hide the entire app */
+  body {
+    background: #ffffff !important;
+  }
+  body > *,
+  #root,
+  #root > * {
     display: none !important;
+    visibility: hidden !important;
+  }
+
+  /* Show only the bill print area */
+  #bill-print-area,
+  #bill-print-area * {
+    display: revert !important;
+    visibility: visible !important;
   }
   #bill-print-area {
-    display: block !important;
     position: fixed !important;
-    top: 0 !important;
     left: 0 !important;
+    top: 0 !important;
     width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 16px !important;
     background: #ffffff !important;
     color: #000000 !important;
-    padding: 20px !important;
-    font-family: 'Courier New', monospace !important;
-    z-index: 9999 !important;
-  }
-  #bill-print-area * {
-    background: transparent !important;
-    color: #000000 !important;
+    font-family: 'Courier New', Courier, monospace !important;
+    font-size: 13px !important;
+    line-height: 1.5 !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+    z-index: 99999 !important;
+    overflow: visible !important;
+  }
+  #bill-print-area * {
+    color: #000000 !important;
+    background-color: transparent !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  #bill-print-area img {
+    display: block !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Page settings */
+  @page {
+    margin: 8mm;
+    size: 80mm auto;
   }
 }
 
