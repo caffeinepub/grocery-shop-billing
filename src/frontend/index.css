@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: 'Outfit';
+  src: url('/assets/fonts/Outfit.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --radius: 0.625rem;
+    --background: 0.08 0 0;
+    --foreground: 0.97 0 0;
+    --card: 0.12 0 0;
+    --card-foreground: 0.97 0 0;
+    --popover: 0.14 0 0;
+    --popover-foreground: 0.97 0 0;
+    --primary: 0.78 0.17 80;
+    --primary-foreground: 0.08 0 0;
+    --secondary: 0.18 0 0;
+    --secondary-foreground: 0.97 0 0;
+    --muted: 0.15 0 0;
+    --muted-foreground: 0.65 0 0;
+    --accent: 0.22 0 0;
+    --accent-foreground: 0.97 0 0;
+    --destructive: 0.577 0.245 27.325;
+    --destructive-foreground: 0.97 0 0;
+    --border: 0.25 0 0;
+    --input: 0.20 0 0;
+    --ring: 0.78 0.17 80;
+    --chart-1: 0.78 0.17 80;
+    --chart-2: 0.65 0.18 160;
+    --chart-3: 0.60 0.15 220;
+    --chart-4: 0.70 0.20 50;
+    --chart-5: 0.55 0.20 290;
+    --sidebar: 0.10 0 0;
+    --sidebar-foreground: 0.97 0 0;
+    --sidebar-primary: 0.78 0.17 80;
+    --sidebar-primary-foreground: 0.08 0 0;
+    --sidebar-accent: 0.18 0 0;
+    --sidebar-accent-foreground: 0.97 0 0;
+    --sidebar-border: 0.22 0 0;
+    --sidebar-ring: 0.78 0.17 80;
+    /* Custom semantic colors */
+    --success: 0.65 0.18 145;
+    --success-foreground: 0.97 0 0;
+    --info: 0.60 0.18 220;
+    --info-foreground: 0.97 0 0;
+    --warning: 0.78 0.17 80;
+    --warning-foreground: 0.08 0 0;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Outfit', sans-serif;
+    font-size: 18px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Print styles */
+@media print {
+  #root {
+    display: none !important;
+  }
+  #bill-print-area {
+    display: block !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    padding: 20px !important;
+    font-family: 'Courier New', monospace !important;
+    z-index: 9999 !important;
+  }
+  #bill-print-area * {
+    background: transparent !important;
+    color: #000000 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: oklch(0.10 0 0);
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(0.25 0 0);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.35 0 0);
+}
+
+/* Input min height for mobile usability */
+.input-large {
+  min-height: 52px;
+  font-size: 1.1rem;
+}
+
+/* Custom amber/gold accent utilities */
+.text-amber-gold {
+  color: oklch(0.78 0.17 80);
+}
+
+.bg-amber-gold {
+  background-color: oklch(0.78 0.17 80);
+}
+
+.border-amber-gold {
+  border-color: oklch(0.78 0.17 80);
+}
+
+/* Slide nav transition */
+.slide-nav-enter {
+  transform: translateX(-100%);
+}
+
+.slide-nav-enter-active {
+  transform: translateX(0);
+  transition: transform 0.3s ease;
+}
+
+/* Barcode scanner line sweep animation */
+@keyframes scan {
+  0% { top: 0; opacity: 1; }
+  50% { opacity: 0.8; }
+  100% { top: 100%; opacity: 1; }
+}
+
+/* Balance amount highlight */
+.balance-highlight {
+  background-color: oklch(0.65 0.18 145 / 0.2);
+  border: 1px solid oklch(0.65 0.18 145);
+  color: oklch(0.65 0.18 145);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
