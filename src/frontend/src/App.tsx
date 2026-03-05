@@ -3462,17 +3462,27 @@ interface SettingsPageProps {
 
 function SettingsPage({ settings, setSettings }: SettingsPageProps) {
   const [form, setForm] = useState<AppSettings>({ ...settings });
+  const [isDirty, setIsDirty] = useState(false);
   const [confirmRestartOrder, setConfirmRestartOrder] = useState(false);
+
+  // Sync form when settings change from backend polling, but ONLY if the user has not made unsaved edits
+  useEffect(() => {
+    if (!isDirty) {
+      setForm({ ...settings });
+    }
+  }, [settings, isDirty]);
 
   const handleBillLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) =>
+    reader.onload = (ev) => {
+      setIsDirty(true);
       setForm((prev) => ({
         ...prev,
         billLogoBase64: ev.target?.result as string,
       }));
+    };
     reader.readAsDataURL(file);
   };
 
@@ -3480,17 +3490,20 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) =>
+    reader.onload = (ev) => {
+      setIsDirty(true);
       setForm((prev) => ({
         ...prev,
         websiteLogoBase64: ev.target?.result as string,
       }));
+    };
     reader.readAsDataURL(file);
   };
 
   const handleSave = async () => {
     await setSettings(form);
     document.title = form.websiteName;
+    setIsDirty(false);
     toast.success("Settings saved!");
   };
 
@@ -3507,7 +3520,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Input
             data-ocid="settings.website_name.input"
             value={form.websiteName}
-            onChange={(e) => setForm({ ...form, websiteName: e.target.value })}
+            onChange={(e) => {
+              setIsDirty(true);
+              setForm({ ...form, websiteName: e.target.value });
+            }}
             className="input-large bg-secondary border-border"
           />
         </div>
@@ -3568,7 +3584,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Input
             data-ocid="settings.shop_name.input"
             value={form.shopName}
-            onChange={(e) => setForm({ ...form, shopName: e.target.value })}
+            onChange={(e) => {
+              setIsDirty(true);
+              setForm({ ...form, shopName: e.target.value });
+            }}
             className="input-large bg-secondary border-border"
           />
         </div>
@@ -3579,7 +3598,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Input
             data-ocid="settings.contact.input"
             value={form.contact}
-            onChange={(e) => setForm({ ...form, contact: e.target.value })}
+            onChange={(e) => {
+              setIsDirty(true);
+              setForm({ ...form, contact: e.target.value });
+            }}
             className="input-large bg-secondary border-border"
           />
         </div>
@@ -3590,7 +3612,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Textarea
             data-ocid="settings.address.textarea"
             value={form.address}
-            onChange={(e) => setForm({ ...form, address: e.target.value })}
+            onChange={(e) => {
+              setIsDirty(true);
+              setForm({ ...form, address: e.target.value });
+            }}
             rows={3}
             className="bg-secondary border-border resize-none"
           />
@@ -3604,7 +3629,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Input
             data-ocid="settings.upi_id.input"
             value={form.upiId}
-            onChange={(e) => setForm({ ...form, upiId: e.target.value })}
+            onChange={(e) => {
+              setIsDirty(true);
+              setForm({ ...form, upiId: e.target.value });
+            }}
             className="input-large bg-secondary border-border"
             placeholder="shop@upi"
           />
@@ -3618,7 +3646,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Input
             data-ocid="settings.qr_note.input"
             value={form.qrNote}
-            onChange={(e) => setForm({ ...form, qrNote: e.target.value })}
+            onChange={(e) => {
+              setIsDirty(true);
+              setForm({ ...form, qrNote: e.target.value });
+            }}
             className="input-large bg-secondary border-border"
           />
         </div>
@@ -3634,7 +3665,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Switch
             data-ocid="settings.show_qr_on_bill.toggle"
             checked={form.showQrOnBill ?? true}
-            onCheckedChange={(v) => setForm({ ...form, showQrOnBill: v })}
+            onCheckedChange={(v) => {
+              setIsDirty(true);
+              setForm({ ...form, showQrOnBill: v });
+            }}
           />
         </div>
 
@@ -3651,7 +3685,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Switch
             data-ocid="settings.show_tax.toggle"
             checked={form.showTax}
-            onCheckedChange={(v) => setForm({ ...form, showTax: v })}
+            onCheckedChange={(v) => {
+              setIsDirty(true);
+              setForm({ ...form, showTax: v });
+            }}
           />
         </div>
 
@@ -3666,7 +3703,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
           <Switch
             data-ocid="settings.gstin_enabled.toggle"
             checked={form.gstinEnabled}
-            onCheckedChange={(v) => setForm({ ...form, gstinEnabled: v })}
+            onCheckedChange={(v) => {
+              setIsDirty(true);
+              setForm({ ...form, gstinEnabled: v });
+            }}
           />
         </div>
         {form.gstinEnabled && (
@@ -3677,7 +3717,10 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
             <Input
               data-ocid="settings.gstin.input"
               value={form.gstin}
-              onChange={(e) => setForm({ ...form, gstin: e.target.value })}
+              onChange={(e) => {
+                setIsDirty(true);
+                setForm({ ...form, gstin: e.target.value });
+              }}
               className="input-large bg-secondary border-border"
               placeholder="e.g. 22AAAAA0000A1Z5"
             />
@@ -4213,18 +4256,25 @@ export default function App() {
 
     const poll = async () => {
       try {
-        const [beSettings, beMenuItems, beOrders] = await Promise.all([
+        const [beSettings, beUsers, beMenuItems, beOrders] = await Promise.all([
           actor.getSettings(),
+          actor.getUsers(),
           actor.getMenuItems(),
           actor.getOrders(),
         ]);
 
         const localSettings = toLocalSettings(beSettings);
+        const localUsers = beUsers.map(toLocalUser);
         const localMenu = beMenuItems.map(toLocalMenuItem);
         const localOrders = beOrders.map(toLocalOrder);
 
         setSettingsState(localSettings);
         saveLS(LS_SETTINGS, localSettings);
+
+        if (localUsers.length > 0) {
+          setUsersState(localUsers);
+          saveLS(LS_USERS, localUsers);
+        }
 
         setMenuItemsState(localMenu);
         saveLS(LS_MENU, localMenu);
@@ -4236,7 +4286,9 @@ export default function App() {
       }
     };
 
-    const id = setInterval(poll, 5000);
+    // Poll immediately, then every second
+    poll();
+    const id = setInterval(poll, 1000);
     return () => clearInterval(id);
   }, [actor]);
 
