@@ -517,7 +517,6 @@ interface ShareBillDialogProps {
   onClose: () => void;
   order: Order;
   settings: AppSettings;
-  billQrDataUrl: string;
 }
 
 function ShareBillDialog({
@@ -525,11 +524,9 @@ function ShareBillDialog({
   onClose,
   order,
   settings,
-  billQrDataUrl,
 }: ShareBillDialogProps) {
   const [phone, setPhone] = useState(order.customerPhone || "");
   const [channel, setChannel] = useState<"whatsapp" | "sms">("whatsapp");
-  const [sharing, setSharing] = useState(false);
 
   // Reset phone when order changes
   useEffect(() => {
@@ -547,15 +544,13 @@ function ShareBillDialog({
     return digits;
   };
 
-  const handleShare = async () => {
+  const handleShare = () => {
     const billText = buildBillText(order, settings);
     const formattedPhone = formatPhoneForUrl(phone);
 
     if (channel === "sms") {
       // SMS: go directly to the phone number's SMS with bill text pre-filled
       const smsBody = encodeURIComponent(billText);
-      // Android uses "sms:NUMBER?body=TEXT", iOS uses "sms:NUMBER&body=TEXT"
-      // Use & for broader compatibility; most modern browsers handle both
       const smsUrl = formattedPhone
         ? `sms:+${formattedPhone}?&body=${smsBody}`
         : `sms:?body=${smsBody}`;
@@ -564,159 +559,12 @@ function ShareBillDialog({
       return;
     }
 
-    // WhatsApp: always open wa.me with the phone number so it goes directly to that chat
-    setSharing(true);
+    // WhatsApp: text only — open wa.me directly to the customer's chat
     const encodedText = encodeURIComponent(billText);
     const waUrl = formattedPhone
       ? `https://wa.me/${formattedPhone}?text=${encodedText}`
       : `https://wa.me/?text=${encodedText}`;
-
-    // Try Web Share API first (mobile devices share bill image + text)
-    try {
-      const { toPng } = await import("html-to-image");
-      const orderData = order;
-      const s = settings;
-      const balance2 =
-        orderData.paymentMode === "cash"
-          ? Math.max(0, orderData.cashAmount - orderData.total)
-          : 0;
-      const itemRows = orderData.items
-        .map(
-          (item) =>
-            `<div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;margin-bottom:2px;">
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
-              <span style="text-align:center;">${item.qty}</span>
-              <span style="text-align:right;">&#8377;${item.mrp}</span>
-              <span style="text-align:right;">&#8377;${item.qty * item.mrp}</span>
-            </div>`,
-        )
-        .join("");
-
-      const container = document.createElement("div");
-      container.style.cssText = [
-        "position:fixed",
-        "top:0",
-        "left:0",
-        "width:320px",
-        "background:#ffffff",
-        "color:#000000",
-        "font-family:'Courier New',Courier,monospace",
-        "font-size:13px",
-        "line-height:1.5",
-        "z-index:-9999",
-        "opacity:0",
-        "pointer-events:none",
-      ].join(";");
-      container.innerHTML = `
-        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:12px;line-height:1.5;">
-          ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
-          <div style="text-align:center;margin-bottom:6px;">
-            <p style="font-weight:bold;font-size:15px;margin:0;">${s.shopName}</p>
-            ${s.contact ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
-            ${s.address ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
-          </div>
-          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
-          <div style="font-size:11px;">
-            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
-            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
-            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
-            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
-            <div style="display:flex;justify-content:space-between;"><span>Time:</span><span>${new Date(orderData.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })}</span></div>
-          </div>
-          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
-          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:11px;font-weight:bold;color:#444;margin-bottom:3px;">
-            <span>Item</span><span style="text-align:center;">Qty</span><span style="text-align:right;">MRP</span><span style="text-align:right;">Amt</span>
-          </div>
-          ${itemRows}
-          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
-          <div style="font-size:11px;">
-            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Subtotal:</span><span>&#8377;${orderData.subtotal.toFixed(2)}</span></div>
-            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Discount:</span><span>- &#8377;${orderData.discount.toFixed(2)}</span></div>` : ""}
-            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:14px;margin-top:2px;"><span>TOTAL:</span><span>&#8377;${orderData.total.toFixed(2)}</span></div>
-          </div>
-          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
-          <div style="font-size:11px;">
-            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
-            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Cash Paid:</span><span>&#8377;${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
-            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>&#8377;${balance2.toFixed(2)}</span></div>` : ""}
-            ${s.gstinEnabled && s.gstin ? `<div style="display:flex;justify-content:space-between;"><span>GSTIN:</span><span>${s.gstin}</span></div>` : ""}
-          </div>
-          ${
-            s.showQrOnBill && billQrDataUrl
-              ? `<hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
-          <div style="text-align:center;padding:6px 0;">
-            <p style="font-size:10px;color:#555;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
-            <img src="${billQrDataUrl}" style="width:110px;height:110px;" />
-            <p style="font-size:10px;color:#555;margin:4px 0 0 0;">${s.upiId}</p>
-          </div>`
-              : ""
-          }
-          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
-          <div style="text-align:center;font-size:12px;">
-            <p style="font-weight:bold;margin:3px 0;">Thank You!</p>
-            <p style="margin:2px 0;font-size:11px;">Visit Again, Come Again!</p>
-            <hr style="border:none;border-top:1px solid #ccc;margin:5px 0;" />
-            <p style="font-weight:600;margin:2px 0;font-size:11px;">Powered By Medwin Techs Thanjavur</p>
-            <p style="opacity:0.5;font-size:9px;margin:2px 0;">medwin2105@gmail.com</p>
-          </div>
-        </div>
-      `;
-      document.body.appendChild(container);
-
-      // Wait for images
-      const imgs = container.querySelectorAll("img");
-      if (imgs.length > 0) {
-        await Promise.all(
-          Array.from(imgs).map(
-            (img) =>
-              new Promise<void>((resolve) => {
-                if (img.complete) resolve();
-                else {
-                  img.onload = () => resolve();
-                  img.onerror = () => resolve();
-                }
-              }),
-          ),
-        );
-      }
-      await new Promise((r) => setTimeout(r, 150));
-
-      const dataUrl = await toPng(container, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-        width: 320,
-      });
-      document.body.removeChild(container);
-
-      // Convert dataUrl to File
-      const res = await fetch(dataUrl);
-      const blob = await res.blob();
-      const imageFile = new File([blob], `bill-${orderData.orderNo}.png`, {
-        type: "image/png",
-      });
-
-      // Try Web Share API with image (works on mobile Chrome/Safari)
-      if (
-        navigator.share &&
-        navigator.canShare &&
-        navigator.canShare({ files: [imageFile] })
-      ) {
-        await navigator.share({
-          files: [imageFile],
-          text: billText,
-          title: `Bill #${orderData.orderNo}`,
-        });
-        setSharing(false);
-        onClose();
-        return;
-      }
-    } catch (err) {
-      console.error("Image generation failed, falling back to text:", err);
-    }
-
-    // Fallback: open WhatsApp URL directly to the phone number
     window.open(waUrl, "_blank");
-    setSharing(false);
     onClose();
   };
 
@@ -774,7 +622,7 @@ function ShareBillDialog({
                   <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
                 </svg>
                 <span className="text-sm font-semibold">WhatsApp</span>
-                <span className="text-xs opacity-70">Image + Text</span>
+                <span className="text-xs opacity-70">Text only</span>
               </button>
               <button
                 type="button"
@@ -805,24 +653,16 @@ function ShareBillDialog({
           <Button
             data-ocid="billing.share_bill.confirm_button"
             onClick={handleShare}
-            disabled={sharing}
             className={
               channel === "whatsapp"
                 ? "bg-green-600 hover:bg-green-700 text-white font-bold"
                 : "bg-blue-600 hover:bg-blue-700 text-white font-bold"
             }
           >
-            {sharing ? (
-              <span className="flex items-center gap-2">
-                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Preparing…
-              </span>
-            ) : (
-              <span className="flex items-center gap-2">
-                <Share2 className="w-4 h-4" />
-                Share via {channel === "whatsapp" ? "WhatsApp" : "SMS"}
-              </span>
-            )}
+            <span className="flex items-center gap-2">
+              <Share2 className="w-4 h-4" />
+              Share via {channel === "whatsapp" ? "WhatsApp" : "SMS"}
+            </span>
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1138,6 +978,395 @@ function SlideNav({
 }
 
 // =============================================================================
+// FAST BARCODE SCANNER HOOK
+// Uses native BarcodeDetector API (very fast, ~100ms per frame) when available,
+// falls back to ZXing decodeFromStream for wider compatibility.
+// =============================================================================
+
+// Extend window type for BarcodeDetector
+declare global {
+  interface Window {
+    BarcodeDetector: new (options?: { formats: string[] }) => {
+      detect: (
+        source: HTMLVideoElement | HTMLCanvasElement | ImageBitmap,
+      ) => Promise<Array<{ rawValue: string }>>;
+    };
+  }
+}
+
+function useFastBarcodeScanner({
+  active,
+  onDetected,
+  onError,
+}: {
+  active: boolean;
+  onDetected: (code: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isActiveRef = useRef(false);
+  const detectedRef = useRef(false);
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  const stopAll = useCallback(() => {
+    isActiveRef.current = false;
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (timerRef.current != null) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (readerRef.current) {
+      try {
+        readerRef.current.reset();
+      } catch {
+        /**/
+      }
+      readerRef.current = null;
+    }
+    if (streamRef.current) {
+      for (const t of streamRef.current.getTracks()) t.stop();
+      streamRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    detectedRef.current = false;
+    setIsInitializing(false);
+  }, []);
+
+  const startScanning = useCallback(async () => {
+    if (!videoRef.current) return;
+    setCameraError(null);
+    setIsInitializing(true);
+    isActiveRef.current = true;
+    detectedRef.current = false;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      if (!isActiveRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
+      streamRef.current = stream;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+      setIsInitializing(false);
+
+      // --- Strategy 1: native BarcodeDetector (Chrome/Android, very fast) ---
+      if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+        const detector = new window.BarcodeDetector({
+          formats: [
+            "ean_13",
+            "ean_8",
+            "upc_a",
+            "upc_e",
+            "code_128",
+            "code_39",
+            "code_93",
+            "qr_code",
+            "data_matrix",
+            "itf",
+          ],
+        });
+        const poll = async () => {
+          if (!isActiveRef.current || detectedRef.current) return;
+          if (videoRef.current && videoRef.current.readyState >= 2) {
+            try {
+              const results = await detector.detect(videoRef.current);
+              if (results.length > 0 && !detectedRef.current) {
+                detectedRef.current = true;
+                onDetected(results[0].rawValue);
+                return;
+              }
+            } catch {
+              /**/
+            }
+          }
+          if (isActiveRef.current) rafRef.current = requestAnimationFrame(poll);
+        };
+        rafRef.current = requestAnimationFrame(poll);
+      } else {
+        // --- Strategy 2: ZXing fallback ---
+        const reader = new BrowserMultiFormatReader();
+        readerRef.current = reader;
+        reader.decodeFromStream(stream, videoRef.current, (result, err) => {
+          if (!isActiveRef.current || detectedRef.current) return;
+          if (result) {
+            detectedRef.current = true;
+            onDetected(result.getText());
+          }
+          if (err && !(err instanceof NotFoundException)) {
+            console.debug("ZXing decode error:", err);
+          }
+        });
+      }
+    } catch (err: unknown) {
+      if (!isActiveRef.current) return;
+      const msg = err instanceof Error ? err.message : "Camera access failed";
+      let friendly = `Camera error: ${msg}`;
+      if (
+        msg.toLowerCase().includes("permission") ||
+        msg.toLowerCase().includes("denied") ||
+        msg.toLowerCase().includes("notallowed")
+      ) {
+        friendly =
+          "Camera permission denied. Please allow camera access and try again.";
+      } else if (
+        msg.toLowerCase().includes("notfound") ||
+        msg.toLowerCase().includes("no camera")
+      ) {
+        friendly = "No camera found on this device.";
+      }
+      setCameraError(friendly);
+      onError(friendly);
+      setIsInitializing(false);
+    }
+  }, [onDetected, onError]);
+
+  useEffect(() => {
+    if (!active) {
+      stopAll();
+      setCameraError(null);
+      return;
+    }
+    let raf: number;
+    const tryStart = () => {
+      if (videoRef.current) {
+        startScanning();
+      } else {
+        raf = requestAnimationFrame(tryStart);
+      }
+    };
+    raf = requestAnimationFrame(tryStart);
+    return () => {
+      cancelAnimationFrame(raf);
+      stopAll();
+    };
+  }, [active, startScanning, stopAll]);
+
+  return {
+    videoRef,
+    isInitializing,
+    cameraError,
+    setCameraError,
+    startScanning,
+    stopAll,
+  };
+}
+
+// Shared UI for file upload in both scanner dialogs
+function ScannerUploadSection({
+  onDetected,
+  uploadProcessing,
+  setUploadProcessing,
+  uploadError,
+  setUploadError,
+  fileInputRef,
+  ocidPrefix,
+}: {
+  onDetected: (code: string) => void;
+  uploadProcessing: boolean;
+  setUploadProcessing: (v: boolean) => void;
+  uploadError: string | null;
+  setUploadError: (v: string | null) => void;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  ocidPrefix: string;
+}) {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError(null);
+    setUploadProcessing(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = (ev) => resolve(ev.target?.result as string);
+        fr.onerror = reject;
+        fr.readAsDataURL(file);
+      });
+      const imgEl = document.createElement("img");
+      imgEl.src = dataUrl;
+      await new Promise<void>((resolve, reject) => {
+        imgEl.onload = () => resolve();
+        imgEl.onerror = () => reject(new Error("Failed to load image"));
+      });
+      // Try native BarcodeDetector first
+      if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+        try {
+          const bitmap = await createImageBitmap(imgEl);
+          const detector = new window.BarcodeDetector({
+            formats: [
+              "ean_13",
+              "ean_8",
+              "upc_a",
+              "upc_e",
+              "code_128",
+              "code_39",
+              "code_93",
+              "qr_code",
+              "data_matrix",
+              "itf",
+            ],
+          });
+          const results = await detector.detect(bitmap);
+          if (results.length > 0) {
+            onDetected(results[0].rawValue);
+            return;
+          }
+        } catch {
+          /**/
+        }
+      }
+      // ZXing fallback
+      const uploadReader = new BrowserMultiFormatReader();
+      try {
+        const result = await uploadReader.decodeFromImageElement(imgEl);
+        onDetected(result.getText());
+      } catch {
+        setUploadError("No barcode found in image. Try a clearer photo.");
+      } finally {
+        uploadReader.reset();
+      }
+    } catch {
+      setUploadError("Failed to read image file.");
+    } finally {
+      setUploadProcessing(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  return (
+    <div className="p-3 space-y-2">
+      <p className="text-xs text-muted-foreground font-medium">
+        Or upload a barcode image:
+      </p>
+      <button
+        type="button"
+        data-ocid={`${ocidPrefix}.upload.dropzone`}
+        className="w-full border border-dashed border-border rounded-lg p-3 flex items-center gap-3 cursor-pointer hover:border-primary/60 transition-colors bg-transparent text-left"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
+          <Download className="w-5 h-5 text-primary" />
+        </div>
+        <div>
+          <p className="font-semibold text-sm text-foreground">
+            Upload barcode image
+          </p>
+          <p className="text-xs text-muted-foreground">
+            JPG, PNG, WebP supported
+          </p>
+        </div>
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleFileUpload}
+        data-ocid={`${ocidPrefix}.file.input`}
+      />
+      {uploadProcessing && (
+        <div
+          data-ocid={`${ocidPrefix}.upload.loading_state`}
+          className="flex items-center gap-2 py-2 text-sm text-muted-foreground"
+        >
+          <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          Reading barcode…
+        </div>
+      )}
+      {uploadError && (
+        <div
+          data-ocid={`${ocidPrefix}.upload.error_state`}
+          className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg px-3 py-2"
+        >
+          <X className="w-4 h-4 shrink-0" />
+          {uploadError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Shared camera viewfinder UI
+function ScannerCameraView({
+  videoRef,
+  isInitializing,
+  cameraError,
+  onRetry,
+  ocidPrefix,
+}: {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  isInitializing: boolean;
+  cameraError: string | null;
+  onRetry: () => void;
+  ocidPrefix: string;
+}) {
+  return (
+    <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="w-full h-full object-cover"
+        style={{ display: cameraError ? "none" : "block" }}
+      />
+      {!cameraError && !isInitializing && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="relative w-56 h-40">
+            <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
+            <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
+            <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
+            <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
+            <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
+          </div>
+        </div>
+      )}
+      {isInitializing && (
+        <div
+          data-ocid={`${ocidPrefix}.camera.loading_state`}
+          className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3"
+        >
+          <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm text-muted-foreground">Starting camera…</p>
+        </div>
+      )}
+      {cameraError && (
+        <div
+          data-ocid={`${ocidPrefix}.camera.error_state`}
+          className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center"
+        >
+          <X className="w-10 h-10 text-destructive" />
+          <p className="text-sm text-destructive font-medium">{cameraError}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-border mt-1"
+            onClick={onRetry}
+          >
+            Retry
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
 // BARCODE SCANNER FOR INPUT (scan barcode into a text field)
 // =============================================================================
 interface BarcodeScannerForInputProps {
@@ -1151,38 +1380,11 @@ function BarcodeScannerForInput({
   onClose,
   onResult,
 }: BarcodeScannerForInputProps) {
-  const [isInitializing, setIsInitializing] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadProcessing, setUploadProcessing] = useState(false);
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
-  const isActiveRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
 
-  const stopReader = useCallback(() => {
-    if (readerRef.current) {
-      try {
-        readerRef.current.reset();
-      } catch {
-        // ignore
-      }
-      readerRef.current = null;
-    }
-    if (streamRef.current) {
-      for (const t of streamRef.current.getTracks()) t.stop();
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    isActiveRef.current = false;
-    setIsInitializing(false);
-  }, []);
-
-  const handleBarcodeResult = useCallback(
+  const handleDetected = useCallback(
     (code: string) => {
       onResult(code);
       toast.success(`Barcode scanned: ${code}`);
@@ -1191,128 +1393,23 @@ function BarcodeScannerForInput({
     [onResult, onClose],
   );
 
-  const startScanning = useCallback(async () => {
-    if (!videoRef.current) return;
-    setCameraError(null);
-    setIsInitializing(true);
-    isActiveRef.current = true;
-
-    try {
-      // Request rear camera using facingMode constraint directly
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false,
-      });
-      if (!isActiveRef.current) {
-        for (const t of stream.getTracks()) t.stop();
-        return;
-      }
-      streamRef.current = stream;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-
-      const reader = new BrowserMultiFormatReader();
-      readerRef.current = reader;
-
-      // Decode from the already-running video element
-      reader.decodeFromStream(stream, videoRef.current, (result, err) => {
-        if (!isActiveRef.current) return;
-        if (result) {
-          handleBarcodeResult(result.getText());
-        }
-        if (err && !(err instanceof NotFoundException)) {
-          console.debug("ZXing decode error:", err);
-        }
-      });
-
-      if (isActiveRef.current) {
-        setIsInitializing(false);
-      }
-    } catch (err: unknown) {
-      if (isActiveRef.current) {
-        const msg = err instanceof Error ? err.message : "Camera access failed";
-        if (
-          msg.toLowerCase().includes("permission") ||
-          msg.toLowerCase().includes("denied") ||
-          msg.toLowerCase().includes("notallowed")
-        ) {
-          setCameraError(
-            "Camera permission denied. Please allow camera access and try again.",
-          );
-        } else if (
-          msg.toLowerCase().includes("notfound") ||
-          msg.toLowerCase().includes("no camera")
-        ) {
-          setCameraError("No camera found on this device.");
-        } else {
-          setCameraError(`Camera error: ${msg}`);
-        }
-        setIsInitializing(false);
-      }
-    }
-  }, [handleBarcodeResult]);
+  const {
+    videoRef,
+    isInitializing,
+    cameraError,
+    setCameraError,
+    startScanning,
+  } = useFastBarcodeScanner({
+    active: open,
+    onDetected: handleDetected,
+    onError: () => {},
+  });
 
   useEffect(() => {
     if (!open) {
-      stopReader();
-      setCameraError(null);
       setUploadError(null);
-      return;
     }
-    // Retry via rAF until the video element is mounted in the Dialog
-    let raf: number;
-    const tryStart = () => {
-      if (videoRef.current) {
-        startScanning();
-      } else {
-        raf = requestAnimationFrame(tryStart);
-      }
-    };
-    raf = requestAnimationFrame(tryStart);
-    return () => {
-      cancelAnimationFrame(raf);
-      stopReader();
-    };
-  }, [open, startScanning, stopReader]);
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadError(null);
-    setUploadProcessing(true);
-
-    try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const fr = new FileReader();
-        fr.onload = (ev) => resolve(ev.target?.result as string);
-        fr.onerror = reject;
-        fr.readAsDataURL(file);
-      });
-
-      const imgEl = document.createElement("img");
-      imgEl.src = dataUrl;
-
-      await new Promise<void>((resolve, reject) => {
-        imgEl.onload = () => resolve();
-        imgEl.onerror = () => reject(new Error("Failed to load image"));
-      });
-
-      const uploadReader = new BrowserMultiFormatReader();
-      try {
-        const result = await uploadReader.decodeFromImageElement(imgEl);
-        handleBarcodeResult(result.getText());
-      } catch {
-        setUploadError("No barcode found in image. Try a clearer photo.");
-      } finally {
-        uploadReader.reset();
-      }
-    } catch {
-      setUploadError("Failed to read image file.");
-    } finally {
-      setUploadProcessing(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
+  }, [open]);
 
   if (!open) return null;
 
@@ -1328,110 +1425,30 @@ function BarcodeScannerForInput({
             Scan Barcode
           </DialogTitle>
         </DialogHeader>
-
-        {/* LIVE CAMERA — always shown */}
-        <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover"
-            style={{ display: cameraError ? "none" : "block" }}
-          />
-
-          {!cameraError && !isInitializing && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="relative w-56 h-40">
-                <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
-                <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
-                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
-                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
-                <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
-              </div>
-            </div>
-          )}
-
-          {isInitializing && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3">
-              <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm text-muted-foreground">Starting camera…</p>
-            </div>
-          )}
-
-          {cameraError && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center">
-              <X className="w-10 h-10 text-destructive" />
-              <p className="text-sm text-destructive font-medium">
-                {cameraError}
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-border mt-1"
-                onClick={() => {
-                  setCameraError(null);
-                  startScanning();
-                }}
-              >
-                Retry
-              </Button>
-            </div>
-          )}
-        </div>
-
-        <div className="p-3 flex items-center justify-between bg-card border-b border-border">
+        <ScannerCameraView
+          videoRef={videoRef}
+          isInitializing={isInitializing}
+          cameraError={cameraError}
+          onRetry={() => {
+            setCameraError(null);
+            startScanning();
+          }}
+          ocidPrefix="barcode_input_scanner"
+        />
+        <div className="p-3 flex items-center bg-card border-b border-border">
           <p className="text-xs text-muted-foreground">
             Point rear camera at barcode
           </p>
         </div>
-
-        {/* UPLOAD SECTION — always visible below camera */}
-        <div className="p-3 space-y-2">
-          <p className="text-xs text-muted-foreground font-medium">
-            Or upload a barcode image:
-          </p>
-          <button
-            type="button"
-            className="w-full border border-dashed border-border rounded-lg p-3 flex items-center gap-3 cursor-pointer hover:border-primary/60 transition-colors bg-transparent text-left"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
-              <Download className="w-5 h-5 text-primary" />
-            </div>
-            <div>
-              <p className="font-semibold text-sm text-foreground">
-                Upload barcode image
-              </p>
-              <p className="text-xs text-muted-foreground">
-                JPG, PNG, WebP supported
-              </p>
-            </div>
-          </button>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleFileUpload}
-          />
-
-          {uploadProcessing && (
-            <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
-              <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-              Reading barcode…
-            </div>
-          )}
-
-          {uploadError && (
-            <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg px-3 py-2">
-              <X className="w-4 h-4 shrink-0" />
-              {uploadError}
-            </div>
-          )}
-        </div>
-
+        <ScannerUploadSection
+          onDetected={handleDetected}
+          uploadProcessing={uploadProcessing}
+          setUploadProcessing={setUploadProcessing}
+          uploadError={uploadError}
+          setUploadError={setUploadError}
+          fileInputRef={fileInputRef}
+          ocidPrefix="barcode_input_scanner"
+        />
         <div className="px-4 pb-4 pt-0">
           <Button
             data-ocid="barcode_input_scanner.back.button"
@@ -1464,38 +1481,11 @@ function BarcodeScannerModal({
   menuItems,
   onAddToCart,
 }: BarcodeScannerModalProps) {
-  const [isInitializing, setIsInitializing] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadProcessing, setUploadProcessing] = useState(false);
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
-  const isActiveRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
 
-  const stopReader = useCallback(() => {
-    if (readerRef.current) {
-      try {
-        readerRef.current.reset();
-      } catch {
-        // ignore
-      }
-      readerRef.current = null;
-    }
-    if (streamRef.current) {
-      for (const t of streamRef.current.getTracks()) t.stop();
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    isActiveRef.current = false;
-    setIsInitializing(false);
-  }, []);
-
-  const handleBarcodeResult = useCallback(
+  const handleDetected = useCallback(
     (code: string) => {
       const item = menuItems.find(
         (m) => m.barcodeEnabled && m.barcode === code,
@@ -1506,134 +1496,29 @@ function BarcodeScannerModal({
         onClose();
       } else {
         toast.error(`Item not found for barcode: ${code}`);
-        // Don't stop scanning — let it continue
+        // Don't close — let user try again
       }
     },
     [menuItems, onAddToCart, onClose],
   );
 
-  const startScanning = useCallback(async () => {
-    if (!videoRef.current) return;
-    setCameraError(null);
-    setIsInitializing(true);
-    isActiveRef.current = true;
+  const {
+    videoRef,
+    isInitializing,
+    cameraError,
+    setCameraError,
+    startScanning,
+  } = useFastBarcodeScanner({
+    active: open,
+    onDetected: handleDetected,
+    onError: () => {},
+  });
 
-    try {
-      // Request rear camera using facingMode constraint directly
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false,
-      });
-      if (!isActiveRef.current) {
-        for (const t of stream.getTracks()) t.stop();
-        return;
-      }
-      streamRef.current = stream;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-
-      const reader = new BrowserMultiFormatReader();
-      readerRef.current = reader;
-
-      reader.decodeFromStream(stream, videoRef.current, (result, err) => {
-        if (!isActiveRef.current) return;
-        if (result) {
-          handleBarcodeResult(result.getText());
-        }
-        if (err && !(err instanceof NotFoundException)) {
-          console.debug("ZXing decode error:", err);
-        }
-      });
-
-      if (isActiveRef.current) {
-        setIsInitializing(false);
-      }
-    } catch (err: unknown) {
-      if (isActiveRef.current) {
-        const msg = err instanceof Error ? err.message : "Camera access failed";
-        if (
-          msg.toLowerCase().includes("permission") ||
-          msg.toLowerCase().includes("denied") ||
-          msg.toLowerCase().includes("notallowed")
-        ) {
-          setCameraError(
-            "Camera permission denied. Please allow camera access and try again.",
-          );
-        } else if (
-          msg.toLowerCase().includes("notfound") ||
-          msg.toLowerCase().includes("no camera")
-        ) {
-          setCameraError("No camera found on this device.");
-        } else {
-          setCameraError(`Camera error: ${msg}`);
-        }
-        setIsInitializing(false);
-      }
-    }
-  }, [handleBarcodeResult]);
-
-  // Start scanning automatically when modal opens
   useEffect(() => {
     if (!open) {
-      stopReader();
-      setCameraError(null);
       setUploadError(null);
-      return;
     }
-    // Retry via rAF until the video element is mounted in the Dialog
-    let raf: number;
-    const tryStart = () => {
-      if (videoRef.current) {
-        startScanning();
-      } else {
-        raf = requestAnimationFrame(tryStart);
-      }
-    };
-    raf = requestAnimationFrame(tryStart);
-    return () => {
-      cancelAnimationFrame(raf);
-      stopReader();
-    };
-  }, [open, startScanning, stopReader]);
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadError(null);
-    setUploadProcessing(true);
-
-    try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const fr = new FileReader();
-        fr.onload = (ev) => resolve(ev.target?.result as string);
-        fr.onerror = reject;
-        fr.readAsDataURL(file);
-      });
-
-      const imgEl = document.createElement("img");
-      imgEl.src = dataUrl;
-
-      await new Promise<void>((resolve, reject) => {
-        imgEl.onload = () => resolve();
-        imgEl.onerror = () => reject(new Error("Failed to load image"));
-      });
-
-      const uploadReader = new BrowserMultiFormatReader();
-      try {
-        const result = await uploadReader.decodeFromImageElement(imgEl);
-        handleBarcodeResult(result.getText());
-      } catch {
-        setUploadError("No barcode found in image. Try a clearer photo.");
-      } finally {
-        uploadReader.reset();
-      }
-    } catch {
-      setUploadError("Failed to read image file.");
-    } finally {
-      setUploadProcessing(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
+  }, [open]);
 
   if (!open) return null;
 
@@ -1649,125 +1534,30 @@ function BarcodeScannerModal({
             Barcode Scanner
           </DialogTitle>
         </DialogHeader>
-
-        {/* LIVE CAMERA — always shown */}
-        <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover"
-            style={{ display: cameraError ? "none" : "block" }}
-          />
-
-          {!cameraError && !isInitializing && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="relative w-56 h-40">
-                <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
-                <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
-                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
-                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
-                <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
-              </div>
-            </div>
-          )}
-
-          {isInitializing && (
-            <div
-              data-ocid="scanner.camera.loading_state"
-              className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3"
-            >
-              <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm text-muted-foreground">Starting camera…</p>
-            </div>
-          )}
-
-          {cameraError && (
-            <div
-              data-ocid="scanner.camera.error_state"
-              className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center"
-            >
-              <X className="w-10 h-10 text-destructive" />
-              <p className="text-sm text-destructive font-medium">
-                {cameraError}
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-border mt-1"
-                onClick={() => {
-                  setCameraError(null);
-                  startScanning();
-                }}
-              >
-                Retry
-              </Button>
-            </div>
-          )}
-        </div>
-
-        {/* Camera label */}
+        <ScannerCameraView
+          videoRef={videoRef}
+          isInitializing={isInitializing}
+          cameraError={cameraError}
+          onRetry={() => {
+            setCameraError(null);
+            startScanning();
+          }}
+          ocidPrefix="scanner"
+        />
         <div className="p-3 flex items-center bg-card border-b border-border">
           <p className="text-xs text-muted-foreground">
             Point rear camera at barcode
           </p>
         </div>
-
-        {/* UPLOAD SECTION — always visible below camera */}
-        <div className="p-3 space-y-2">
-          <p className="text-xs text-muted-foreground font-medium">
-            Or upload a barcode image:
-          </p>
-          <button
-            type="button"
-            data-ocid="scanner.upload.dropzone"
-            className="w-full border border-dashed border-border rounded-lg p-3 flex items-center gap-3 cursor-pointer hover:border-primary/60 transition-colors bg-transparent text-left"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
-              <Download className="w-5 h-5 text-primary" />
-            </div>
-            <div>
-              <p className="font-semibold text-sm text-foreground">
-                Upload barcode image
-              </p>
-              <p className="text-xs text-muted-foreground">
-                JPG, PNG, WebP supported
-              </p>
-            </div>
-          </button>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleFileUpload}
-            data-ocid="scanner.file.input"
-          />
-
-          {uploadProcessing && (
-            <div
-              data-ocid="scanner.upload.loading_state"
-              className="flex items-center gap-2 py-2 text-sm text-muted-foreground"
-            >
-              <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-              Reading barcode…
-            </div>
-          )}
-
-          {uploadError && (
-            <div
-              data-ocid="scanner.upload.error_state"
-              className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg px-3 py-2"
-            >
-              <X className="w-4 h-4 shrink-0" />
-              {uploadError}
-            </div>
-          )}
-        </div>
-
+        <ScannerUploadSection
+          onDetected={handleDetected}
+          uploadProcessing={uploadProcessing}
+          setUploadProcessing={setUploadProcessing}
+          uploadError={uploadError}
+          setUploadError={setUploadError}
+          fileInputRef={fileInputRef}
+          ocidPrefix="scanner"
+        />
         <div className="px-4 pb-4 pt-0">
           <Button
             data-ocid="scanner.back.button"
@@ -2762,7 +2552,6 @@ function BillingPage({
           onClose={() => setShowShareDialog(false)}
           order={completedOrder}
           settings={settings}
-          billQrDataUrl={billQrDataUrl}
         />
       )}
 
