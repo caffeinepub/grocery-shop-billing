@@ -552,21 +552,27 @@ function ShareBillDialog({
     const formattedPhone = formatPhoneForUrl(phone);
 
     if (channel === "sms") {
+      // SMS: go directly to the phone number's SMS with bill text pre-filled
       const smsBody = encodeURIComponent(billText);
+      // Android uses "sms:NUMBER?body=TEXT", iOS uses "sms:NUMBER&body=TEXT"
+      // Use & for broader compatibility; most modern browsers handle both
       const smsUrl = formattedPhone
-        ? `sms:${formattedPhone}?body=${smsBody}`
+        ? `sms:+${formattedPhone}?&body=${smsBody}`
         : `sms:?body=${smsBody}`;
-      const a = document.createElement("a");
-      a.href = smsUrl;
-      a.click();
-      onClose();
+      window.location.href = smsUrl;
+      setTimeout(() => onClose(), 500);
       return;
     }
 
-    // WhatsApp
+    // WhatsApp: always open wa.me with the phone number so it goes directly to that chat
     setSharing(true);
+    const encodedText = encodeURIComponent(billText);
+    const waUrl = formattedPhone
+      ? `https://wa.me/${formattedPhone}?text=${encodedText}`
+      : `https://wa.me/?text=${encodedText}`;
+
+    // Try Web Share API first (mobile devices share bill image + text)
     try {
-      // Try to generate bill image
       const { toPng } = await import("html-to-image");
       const orderData = order;
       const s = settings;
@@ -580,86 +586,105 @@ function ShareBillDialog({
             `<div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;margin-bottom:2px;">
               <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
               <span style="text-align:center;">${item.qty}</span>
-              <span style="text-align:right;">₹${item.mrp}</span>
-              <span style="text-align:right;">₹${item.qty * item.mrp}</span>
+              <span style="text-align:right;">&#8377;${item.mrp}</span>
+              <span style="text-align:right;">&#8377;${item.qty * item.mrp}</span>
             </div>`,
         )
         .join("");
 
       const container = document.createElement("div");
-      container.style.cssText = `
-        position: fixed;
-        left: -9999px;
-        top: 0;
-        width: 380px;
-        background: #ffffff;
-        padding: 24px;
-        font-family: 'Courier New', Courier, monospace;
-        color: #000000;
-        font-size: 14px;
-        line-height: 1.4;
-        z-index: -1;
-      `;
+      container.style.cssText = [
+        "position:fixed",
+        "top:0",
+        "left:0",
+        "width:320px",
+        "background:#ffffff",
+        "color:#000000",
+        "font-family:'Courier New',Courier,monospace",
+        "font-size:13px",
+        "line-height:1.5",
+        "z-index:-9999",
+        "opacity:0",
+        "pointer-events:none",
+      ].join(";");
       container.innerHTML = `
-        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:14px;padding:8px;">
+        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:12px;line-height:1.5;">
           ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
           <div style="text-align:center;margin-bottom:6px;">
-            <p style="font-weight:bold;font-size:16px;margin:0;">${s.shopName}</p>
-            ${s.contact ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
-            ${s.address ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
+            <p style="font-weight:bold;font-size:15px;margin:0;">${s.shopName}</p>
+            ${s.contact ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
+            ${s.address ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
           </div>
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="font-size:12px;">
-            <div style="display:flex;justify-content:space-between;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
-            <div style="display:flex;justify-content:space-between;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
-            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
-            <div style="display:flex;justify-content:space-between;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="font-size:11px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
+            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
             <div style="display:flex;justify-content:space-between;"><span>Time:</span><span>${new Date(orderData.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })}</span></div>
           </div>
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;font-weight:bold;color:#555;margin-bottom:4px;">
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:11px;font-weight:bold;color:#444;margin-bottom:3px;">
             <span>Item</span><span style="text-align:center;">Qty</span><span style="text-align:right;">MRP</span><span style="text-align:right;">Amt</span>
           </div>
           ${itemRows}
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="font-size:12px;">
-            <div style="display:flex;justify-content:space-between;"><span>Subtotal:</span><span>₹${orderData.subtotal.toFixed(2)}</span></div>
-            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Discount:</span><span>- ₹${orderData.discount.toFixed(2)}</span></div>` : ""}
-            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:16px;"><span>TOTAL:</span><span>₹${orderData.total.toFixed(2)}</span></div>
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="font-size:11px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Subtotal:</span><span>&#8377;${orderData.subtotal.toFixed(2)}</span></div>
+            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Discount:</span><span>- &#8377;${orderData.discount.toFixed(2)}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:14px;margin-top:2px;"><span>TOTAL:</span><span>&#8377;${orderData.total.toFixed(2)}</span></div>
           </div>
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="font-size:12px;">
-            <div style="display:flex;justify-content:space-between;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
-            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Cash Paid:</span><span>₹${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
-            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>₹${balance2.toFixed(2)}</span></div>` : ""}
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="font-size:11px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
+            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Cash Paid:</span><span>&#8377;${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
+            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>&#8377;${balance2.toFixed(2)}</span></div>` : ""}
             ${s.gstinEnabled && s.gstin ? `<div style="display:flex;justify-content:space-between;"><span>GSTIN:</span><span>${s.gstin}</span></div>` : ""}
           </div>
           ${
             s.showQrOnBill && billQrDataUrl
-              ? `<hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="text-align:center;padding:8px 0;">
-            <p style="font-size:11px;color:#666;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
-            <img src="${billQrDataUrl}" style="width:120px;height:120px;" />
-            <p style="font-size:11px;color:#666;margin:4px 0 0 0;">${s.upiId}</p>
+              ? `<hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="text-align:center;padding:6px 0;">
+            <p style="font-size:10px;color:#555;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
+            <img src="${billQrDataUrl}" style="width:110px;height:110px;" />
+            <p style="font-size:10px;color:#555;margin:4px 0 0 0;">${s.upiId}</p>
           </div>`
               : ""
           }
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="text-align:center;font-size:13px;">
-            <p style="font-weight:bold;margin:4px 0;">Thank You!</p>
-            <p style="margin:2px 0;">Visit Again, Come Again!</p>
-            <hr style="border:none;border-top:1px solid #ccc;margin:6px 0;" />
-            <p style="font-weight:600;margin:2px 0;">Powered By Medwin Techs Thanjavur</p>
-            <p style="opacity:0.5;font-size:10px;margin:2px 0;">medwin2105@gmail.com</p>
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="text-align:center;font-size:12px;">
+            <p style="font-weight:bold;margin:3px 0;">Thank You!</p>
+            <p style="margin:2px 0;font-size:11px;">Visit Again, Come Again!</p>
+            <hr style="border:none;border-top:1px solid #ccc;margin:5px 0;" />
+            <p style="font-weight:600;margin:2px 0;font-size:11px;">Powered By Medwin Techs Thanjavur</p>
+            <p style="opacity:0.5;font-size:9px;margin:2px 0;">medwin2105@gmail.com</p>
           </div>
         </div>
       `;
       document.body.appendChild(container);
-      await new Promise((r) => setTimeout(r, 300));
+
+      // Wait for images
+      const imgs = container.querySelectorAll("img");
+      if (imgs.length > 0) {
+        await Promise.all(
+          Array.from(imgs).map(
+            (img) =>
+              new Promise<void>((resolve) => {
+                if (img.complete) resolve();
+                else {
+                  img.onload = () => resolve();
+                  img.onerror = () => resolve();
+                }
+              }),
+          ),
+        );
+      }
+      await new Promise((r) => setTimeout(r, 150));
 
       const dataUrl = await toPng(container, {
         backgroundColor: "#ffffff",
         pixelRatio: 2,
+        width: 320,
       });
       document.body.removeChild(container);
 
@@ -670,7 +695,7 @@ function ShareBillDialog({
         type: "image/png",
       });
 
-      // Try Web Share API with image
+      // Try Web Share API with image (works on mobile Chrome/Safari)
       if (
         navigator.share &&
         navigator.canShare &&
@@ -679,25 +704,18 @@ function ShareBillDialog({
         await navigator.share({
           files: [imageFile],
           text: billText,
+          title: `Bill #${orderData.orderNo}`,
         });
         setSharing(false);
         onClose();
         return;
       }
-
-      // Fallback: open WhatsApp URL
-      const waUrl = formattedPhone
-        ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(billText)}`
-        : `https://wa.me/?text=${encodeURIComponent(billText)}`;
-      window.open(waUrl, "_blank");
     } catch (err) {
-      console.error("Share failed:", err);
-      // Final fallback
-      const waUrl = formattedPhone
-        ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(billText)}`
-        : `https://wa.me/?text=${encodeURIComponent(billText)}`;
-      window.open(waUrl, "_blank");
+      console.error("Image generation failed, falling back to text:", err);
     }
+
+    // Fallback: open WhatsApp URL directly to the phone number
+    window.open(waUrl, "_blank");
     setSharing(false);
     onClose();
   };
@@ -1136,16 +1154,13 @@ function BarcodeScannerForInput({
   const [isInitializing, setIsInitializing] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<"environment" | "user">(
-    "environment",
-  );
-  const [isFlipping, setIsFlipping] = useState(false);
   const [uploadProcessing, setUploadProcessing] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const isActiveRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const stopReader = useCallback(() => {
     if (readerRef.current) {
@@ -1155,6 +1170,13 @@ function BarcodeScannerForInput({
         // ignore
       }
       readerRef.current = null;
+    }
+    if (streamRef.current) {
+      for (const t of streamRef.current.getTracks()) t.stop();
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     isActiveRef.current = false;
     setIsInitializing(false);
@@ -1169,79 +1191,66 @@ function BarcodeScannerForInput({
     [onResult, onClose],
   );
 
-  const startScanning = useCallback(
-    async (facing: "environment" | "user") => {
-      if (!videoRef.current) return;
-      setCameraError(null);
-      setIsInitializing(true);
-      isActiveRef.current = true;
+  const startScanning = useCallback(async () => {
+    if (!videoRef.current) return;
+    setCameraError(null);
+    setIsInitializing(true);
+    isActiveRef.current = true;
 
-      try {
-        const reader = new BrowserMultiFormatReader();
-        readerRef.current = reader;
-
-        const devices = await reader.listVideoInputDevices();
-        let deviceId: string | null = null;
-        if (devices.length > 1) {
-          const keyword = facing === "environment" ? "back" : "front";
-          const matched = devices.find((d) =>
-            d.label.toLowerCase().includes(keyword),
-          );
-          if (matched) {
-            deviceId = matched.deviceId;
-          } else {
-            deviceId =
-              facing === "environment"
-                ? devices[devices.length - 1].deviceId
-                : devices[0].deviceId;
-          }
-        } else if (devices.length === 1) {
-          deviceId = devices[0].deviceId;
-        }
-
-        await reader.decodeFromVideoDevice(
-          deviceId,
-          videoRef.current,
-          (result, err) => {
-            if (!isActiveRef.current) return;
-            if (result) {
-              handleBarcodeResult(result.getText());
-            }
-            if (err && !(err instanceof NotFoundException)) {
-              console.debug("ZXing decode error:", err);
-            }
-          },
-        );
-
-        if (isActiveRef.current) {
-          setIsInitializing(false);
-        }
-      } catch (err: unknown) {
-        if (isActiveRef.current) {
-          const msg =
-            err instanceof Error ? err.message : "Camera access failed";
-          if (
-            msg.toLowerCase().includes("permission") ||
-            msg.toLowerCase().includes("denied") ||
-            msg.toLowerCase().includes("notallowed")
-          ) {
-            setCameraError(
-              "Camera permission denied. Please allow camera access and try again.",
-            );
-          } else if (
-            msg.toLowerCase().includes("notfound") ||
-            msg.toLowerCase().includes("no camera")
-          ) {
-            setCameraError("No camera found on this device.");
-          } else {
-            setCameraError(`Camera error: ${msg}`);
-          }
-          setIsInitializing(false);
-        }
+    try {
+      // Request rear camera using facingMode constraint directly
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      if (!isActiveRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
       }
-    },
-    [handleBarcodeResult],
-  );
+      streamRef.current = stream;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+
+      const reader = new BrowserMultiFormatReader();
+      readerRef.current = reader;
+
+      // Decode from the already-running video element
+      reader.decodeFromStream(stream, videoRef.current, (result, err) => {
+        if (!isActiveRef.current) return;
+        if (result) {
+          handleBarcodeResult(result.getText());
+        }
+        if (err && !(err instanceof NotFoundException)) {
+          console.debug("ZXing decode error:", err);
+        }
+      });
+
+      if (isActiveRef.current) {
+        setIsInitializing(false);
+      }
+    } catch (err: unknown) {
+      if (isActiveRef.current) {
+        const msg = err instanceof Error ? err.message : "Camera access failed";
+        if (
+          msg.toLowerCase().includes("permission") ||
+          msg.toLowerCase().includes("denied") ||
+          msg.toLowerCase().includes("notallowed")
+        ) {
+          setCameraError(
+            "Camera permission denied. Please allow camera access and try again.",
+          );
+        } else if (
+          msg.toLowerCase().includes("notfound") ||
+          msg.toLowerCase().includes("no camera")
+        ) {
+          setCameraError("No camera found on this device.");
+        } else {
+          setCameraError(`Camera error: ${msg}`);
+        }
+        setIsInitializing(false);
+      }
+    }
+  }, [handleBarcodeResult]);
 
   useEffect(() => {
     if (!open) {
@@ -1250,22 +1259,21 @@ function BarcodeScannerForInput({
       setUploadError(null);
       return;
     }
-    startScanning(facingMode);
+    // Retry via rAF until the video element is mounted in the Dialog
+    let raf: number;
+    const tryStart = () => {
+      if (videoRef.current) {
+        startScanning();
+      } else {
+        raf = requestAnimationFrame(tryStart);
+      }
+    };
+    raf = requestAnimationFrame(tryStart);
     return () => {
+      cancelAnimationFrame(raf);
       stopReader();
     };
-  }, [open, startScanning, stopReader, facingMode]);
-
-  const handleFlipCamera = async () => {
-    if (isFlipping || isInitializing) return;
-    setIsFlipping(true);
-    const newFacing = facingMode === "environment" ? "user" : "environment";
-    setFacingMode(newFacing);
-    stopReader();
-    await new Promise((r) => setTimeout(r, 300));
-    await startScanning(newFacing);
-    setIsFlipping(false);
-  };
+  }, [open, startScanning, stopReader]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1363,7 +1371,7 @@ function BarcodeScannerForInput({
                 className="border-border mt-1"
                 onClick={() => {
                   setCameraError(null);
-                  startScanning(facingMode);
+                  startScanning();
                 }}
               >
                 Retry
@@ -1374,18 +1382,8 @@ function BarcodeScannerForInput({
 
         <div className="p-3 flex items-center justify-between bg-card border-b border-border">
           <p className="text-xs text-muted-foreground">
-            Point camera at barcode
+            Point rear camera at barcode
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={isFlipping || isInitializing || !!cameraError}
-            onClick={handleFlipCamera}
-            className="border-border text-xs gap-1.5"
-          >
-            <Camera className="w-3.5 h-3.5" />
-            Flip Camera
-          </Button>
         </div>
 
         {/* UPLOAD SECTION — always visible below camera */}
@@ -1436,11 +1434,13 @@ function BarcodeScannerForInput({
 
         <div className="px-4 pb-4 pt-0">
           <Button
+            data-ocid="barcode_input_scanner.back.button"
             variant="outline"
-            className="w-full border-border"
+            className="w-full border-border gap-2"
             onClick={onClose}
           >
-            Close
+            <ChevronLeft className="w-4 h-4" />
+            Back to Add Item
           </Button>
         </div>
       </DialogContent>
@@ -1467,16 +1467,13 @@ function BarcodeScannerModal({
   const [isInitializing, setIsInitializing] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<"environment" | "user">(
-    "environment",
-  );
-  const [isFlipping, setIsFlipping] = useState(false);
   const [uploadProcessing, setUploadProcessing] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const isActiveRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const stopReader = useCallback(() => {
     if (readerRef.current) {
@@ -1486,6 +1483,13 @@ function BarcodeScannerModal({
         // ignore
       }
       readerRef.current = null;
+    }
+    if (streamRef.current) {
+      for (const t of streamRef.current.getTracks()) t.stop();
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     isActiveRef.current = false;
     setIsInitializing(false);
@@ -1508,79 +1512,65 @@ function BarcodeScannerModal({
     [menuItems, onAddToCart, onClose],
   );
 
-  const startScanning = useCallback(
-    async (facing: "environment" | "user") => {
-      if (!videoRef.current) return;
-      setCameraError(null);
-      setIsInitializing(true);
-      isActiveRef.current = true;
+  const startScanning = useCallback(async () => {
+    if (!videoRef.current) return;
+    setCameraError(null);
+    setIsInitializing(true);
+    isActiveRef.current = true;
 
-      try {
-        const reader = new BrowserMultiFormatReader();
-        readerRef.current = reader;
-
-        const devices = await reader.listVideoInputDevices();
-        let deviceId: string | null = null;
-        if (devices.length > 1) {
-          const keyword = facing === "environment" ? "back" : "front";
-          const matched = devices.find((d) =>
-            d.label.toLowerCase().includes(keyword),
-          );
-          if (matched) {
-            deviceId = matched.deviceId;
-          } else {
-            deviceId =
-              facing === "environment"
-                ? devices[devices.length - 1].deviceId
-                : devices[0].deviceId;
-          }
-        } else if (devices.length === 1) {
-          deviceId = devices[0].deviceId;
-        }
-
-        await reader.decodeFromVideoDevice(
-          deviceId,
-          videoRef.current,
-          (result, err) => {
-            if (!isActiveRef.current) return;
-            if (result) {
-              handleBarcodeResult(result.getText());
-            }
-            if (err && !(err instanceof NotFoundException)) {
-              console.debug("ZXing decode error:", err);
-            }
-          },
-        );
-
-        if (isActiveRef.current) {
-          setIsInitializing(false);
-        }
-      } catch (err: unknown) {
-        if (isActiveRef.current) {
-          const msg =
-            err instanceof Error ? err.message : "Camera access failed";
-          if (
-            msg.toLowerCase().includes("permission") ||
-            msg.toLowerCase().includes("denied") ||
-            msg.toLowerCase().includes("notallowed")
-          ) {
-            setCameraError(
-              "Camera permission denied. Please allow camera access and try again.",
-            );
-          } else if (
-            msg.toLowerCase().includes("notfound") ||
-            msg.toLowerCase().includes("no camera")
-          ) {
-            setCameraError("No camera found on this device.");
-          } else {
-            setCameraError(`Camera error: ${msg}`);
-          }
-          setIsInitializing(false);
-        }
+    try {
+      // Request rear camera using facingMode constraint directly
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      if (!isActiveRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
       }
-    },
-    [handleBarcodeResult],
-  );
+      streamRef.current = stream;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+
+      const reader = new BrowserMultiFormatReader();
+      readerRef.current = reader;
+
+      reader.decodeFromStream(stream, videoRef.current, (result, err) => {
+        if (!isActiveRef.current) return;
+        if (result) {
+          handleBarcodeResult(result.getText());
+        }
+        if (err && !(err instanceof NotFoundException)) {
+          console.debug("ZXing decode error:", err);
+        }
+      });
+
+      if (isActiveRef.current) {
+        setIsInitializing(false);
+      }
+    } catch (err: unknown) {
+      if (isActiveRef.current) {
+        const msg = err instanceof Error ? err.message : "Camera access failed";
+        if (
+          msg.toLowerCase().includes("permission") ||
+          msg.toLowerCase().includes("denied") ||
+          msg.toLowerCase().includes("notallowed")
+        ) {
+          setCameraError(
+            "Camera permission denied. Please allow camera access and try again.",
+          );
+        } else if (
+          msg.toLowerCase().includes("notfound") ||
+          msg.toLowerCase().includes("no camera")
+        ) {
+          setCameraError("No camera found on this device.");
+        } else {
+          setCameraError(`Camera error: ${msg}`);
+        }
+        setIsInitializing(false);
+      }
+    }
+  }, [handleBarcodeResult]);
 
   // Start scanning automatically when modal opens
   useEffect(() => {
@@ -1590,22 +1580,21 @@ function BarcodeScannerModal({
       setUploadError(null);
       return;
     }
-    startScanning(facingMode);
+    // Retry via rAF until the video element is mounted in the Dialog
+    let raf: number;
+    const tryStart = () => {
+      if (videoRef.current) {
+        startScanning();
+      } else {
+        raf = requestAnimationFrame(tryStart);
+      }
+    };
+    raf = requestAnimationFrame(tryStart);
     return () => {
+      cancelAnimationFrame(raf);
       stopReader();
     };
-  }, [open, startScanning, stopReader, facingMode]);
-
-  const handleFlipCamera = async () => {
-    if (isFlipping || isInitializing) return;
-    setIsFlipping(true);
-    const newFacing = facingMode === "environment" ? "user" : "environment";
-    setFacingMode(newFacing);
-    stopReader();
-    await new Promise((r) => setTimeout(r, 300));
-    await startScanning(newFacing);
-    setIsFlipping(false);
-  };
+  }, [open, startScanning, stopReader]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1709,7 +1698,7 @@ function BarcodeScannerModal({
                 className="border-border mt-1"
                 onClick={() => {
                   setCameraError(null);
-                  startScanning(facingMode);
+                  startScanning();
                 }}
               >
                 Retry
@@ -1718,22 +1707,11 @@ function BarcodeScannerModal({
           )}
         </div>
 
-        {/* Camera controls */}
-        <div className="p-3 flex items-center justify-between bg-card border-b border-border">
+        {/* Camera label */}
+        <div className="p-3 flex items-center bg-card border-b border-border">
           <p className="text-xs text-muted-foreground">
-            Point camera at barcode
+            Point rear camera at barcode
           </p>
-          <Button
-            data-ocid="scanner.flip_camera.button"
-            variant="outline"
-            size="sm"
-            disabled={isFlipping || isInitializing || !!cameraError}
-            onClick={handleFlipCamera}
-            className="border-border text-xs gap-1.5"
-          >
-            <Camera className="w-3.5 h-3.5" />
-            Flip Camera
-          </Button>
         </div>
 
         {/* UPLOAD SECTION — always visible below camera */}
@@ -1792,12 +1770,13 @@ function BarcodeScannerModal({
 
         <div className="px-4 pb-4 pt-0">
           <Button
-            data-ocid="scanner.close.button"
+            data-ocid="scanner.back.button"
             variant="outline"
-            className="w-full border-border"
+            className="w-full border-border gap-2"
             onClick={onClose}
           >
-            Close
+            <ChevronLeft className="w-4 h-4" />
+            Back to Billing
           </Button>
         </div>
       </DialogContent>
@@ -2003,38 +1982,136 @@ function BillingPage({
   };
 
   const handlePrintBill = () => {
-    // Set a flag so CSS knows we're printing the bill specifically
-    document.body.setAttribute("data-printing-bill", "true");
-    window.print();
-    // Remove flag after print dialog closes
-    setTimeout(() => {
-      document.body.removeAttribute("data-printing-bill");
-    }, 1000);
+    if (!completedOrder) return;
+    const s = settings;
+    const orderData = completedOrder;
+    const balance2 =
+      orderData.paymentMode === "cash"
+        ? Math.max(0, orderData.cashAmount - orderData.total)
+        : 0;
+    const itemRows = orderData.items
+      .map(
+        (item) =>
+          `<div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;margin-bottom:2px;">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
+            <span style="text-align:center;">${item.qty}</span>
+            <span style="text-align:right;">&#8377;${item.mrp}</span>
+            <span style="text-align:right;">&#8377;${item.qty * item.mrp}</span>
+          </div>`,
+      )
+      .join("");
+
+    const billHtml = `
+      <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:8px;line-height:1.5;">
+        ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
+        <div style="text-align:center;margin-bottom:6px;">
+          <p style="font-weight:bold;font-size:15px;margin:0;">${s.shopName}</p>
+          ${s.contact ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
+          ${s.address ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
+        </div>
+        <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+        <div style="font-size:11px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
+          ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
+          <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Time:</span><span>${new Date(orderData.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })}</span></div>
+        </div>
+        <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+        <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:11px;font-weight:bold;color:#444;margin-bottom:3px;">
+          <span>Item</span><span style="text-align:center;">Qty</span><span style="text-align:right;">MRP</span><span style="text-align:right;">Amt</span>
+        </div>
+        ${itemRows}
+        <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+        <div style="font-size:11px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Subtotal:</span><span>&#8377;${orderData.subtotal.toFixed(2)}</span></div>
+          ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Discount:</span><span>- &#8377;${orderData.discount.toFixed(2)}</span></div>` : ""}
+          <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:14px;margin-top:2px;"><span>TOTAL:</span><span>&#8377;${orderData.total.toFixed(2)}</span></div>
+        </div>
+        <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+        <div style="font-size:11px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
+          ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Cash Paid:</span><span>&#8377;${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
+          ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>&#8377;${balance2.toFixed(2)}</span></div>` : ""}
+          ${s.gstinEnabled && s.gstin ? `<div style="display:flex;justify-content:space-between;"><span>GSTIN:</span><span>${s.gstin}</span></div>` : ""}
+        </div>
+        ${
+          s.showQrOnBill && billQrDataUrl
+            ? `<hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+        <div style="text-align:center;padding:6px 0;">
+          <p style="font-size:10px;color:#555;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
+          <img src="${billQrDataUrl}" style="width:110px;height:110px;" />
+          <p style="font-size:10px;color:#555;margin:4px 0 0 0;">${s.upiId}</p>
+        </div>`
+            : ""
+        }
+        <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+        <div style="text-align:center;font-size:12px;">
+          <p style="font-weight:bold;margin:3px 0;">Thank You!</p>
+          <p style="margin:2px 0;font-size:11px;">Visit Again, Come Again!</p>
+          <hr style="border:none;border-top:1px solid #ccc;margin:5px 0;" />
+          <p style="font-weight:600;margin:2px 0;font-size:11px;">Powered By Medwin Techs Thanjavur</p>
+          <p style="opacity:0.5;font-size:9px;margin:2px 0;">medwin2105@gmail.com</p>
+        </div>
+      </div>
+    `;
+
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText =
+      "position:fixed;left:-9999px;top:0;width:0;height:0;border:none;";
+    document.body.appendChild(iframe);
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) {
+      document.body.removeChild(iframe);
+      return;
+    }
+    iframeDoc.open();
+    iframeDoc.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  @page { size: 58mm auto; margin: 4mm; }
+  body { margin: 0; padding: 0; background: #fff; color: #000; font-family: 'Courier New', Courier, monospace; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>${billHtml}</body>
+</html>`);
+    iframeDoc.close();
+
+    // Wait for images then print
+    const images = iframeDoc.querySelectorAll("img");
+    let loaded = 0;
+    const total = images.length;
+    const doPrint = () => {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      setTimeout(() => {
+        document.body.removeChild(iframe);
+      }, 2000);
+    };
+    if (total === 0) {
+      setTimeout(doPrint, 200);
+    } else {
+      for (const img of Array.from(images)) {
+        if (img.complete) {
+          loaded++;
+          if (loaded >= total) setTimeout(doPrint, 200);
+        } else {
+          img.onload = img.onerror = () => {
+            loaded++;
+            if (loaded >= total) setTimeout(doPrint, 200);
+          };
+        }
+      }
+    }
   };
 
   const handleDownloadBill = async () => {
     if (!completedOrder) return;
     try {
       const { toPng } = await import("html-to-image");
-
-      // Create a fresh off-screen container with all needed styles
-      const container = document.createElement("div");
-      container.style.cssText = `
-        position: fixed;
-        left: -9999px;
-        top: 0;
-        width: 380px;
-        background: #ffffff;
-        padding: 24px;
-        font-family: 'Courier New', Courier, monospace;
-        color: #000000;
-        font-size: 14px;
-        line-height: 1.4;
-        z-index: -1;
-      `;
-      document.body.appendChild(container);
-
-      // Render bill HTML as a simple string to avoid React portal issues
       const orderData = completedOrder;
       const s = settings;
       const balance2 =
@@ -2047,74 +2124,110 @@ function BillingPage({
             `<div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;margin-bottom:2px;">
               <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.name}</span>
               <span style="text-align:center;">${item.qty}</span>
-              <span style="text-align:right;">₹${item.mrp}</span>
-              <span style="text-align:right;">₹${item.qty * item.mrp}</span>
+              <span style="text-align:right;">&#8377;${item.mrp}</span>
+              <span style="text-align:right;">&#8377;${item.qty * item.mrp}</span>
             </div>`,
         )
         .join("");
 
-      container.innerHTML = `
-        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:14px;padding:8px;">
+      const billInnerHtml = `
+        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:12px;line-height:1.5;">
           ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
           <div style="text-align:center;margin-bottom:6px;">
-            <p style="font-weight:bold;font-size:16px;margin:0;">${s.shopName}</p>
-            ${s.contact ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
-            ${s.address ? `<p style="color:#666;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
+            <p style="font-weight:bold;font-size:15px;margin:0;">${s.shopName}</p>
+            ${s.contact ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.contact}</p>` : ""}
+            ${s.address ? `<p style="color:#555;font-size:11px;margin:2px 0;">${s.address}</p>` : ""}
           </div>
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="font-size:12px;">
-            <div style="display:flex;justify-content:space-between;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
-            <div style="display:flex;justify-content:space-between;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
-            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
-            <div style="display:flex;justify-content:space-between;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="font-size:11px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Order No:</span><span style="font-weight:bold;">#${orderData.orderNo}</span></div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Customer:</span><span style="font-weight:bold;">${orderData.customerName}</span></div>
+            ${orderData.customerPhone ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Phone:</span><span>${orderData.customerPhone}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Date:</span><span>${new Date(orderData.timestamp).toLocaleDateString("en-IN")}</span></div>
             <div style="display:flex;justify-content:space-between;"><span>Time:</span><span>${new Date(orderData.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })}</span></div>
           </div>
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:12px;font-weight:bold;color:#555;margin-bottom:4px;">
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="display:grid;grid-template-columns:5fr 2fr 2fr 3fr;font-size:11px;font-weight:bold;color:#444;margin-bottom:3px;">
             <span>Item</span><span style="text-align:center;">Qty</span><span style="text-align:right;">MRP</span><span style="text-align:right;">Amt</span>
           </div>
           ${itemRows}
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="font-size:12px;">
-            <div style="display:flex;justify-content:space-between;"><span>Subtotal:</span><span>₹${orderData.subtotal.toFixed(2)}</span></div>
-            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Discount:</span><span>- ₹${orderData.discount.toFixed(2)}</span></div>` : ""}
-            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:16px;"><span>TOTAL:</span><span>₹${orderData.total.toFixed(2)}</span></div>
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="font-size:11px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Subtotal:</span><span>&#8377;${orderData.subtotal.toFixed(2)}</span></div>
+            ${orderData.discount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Discount:</span><span>- &#8377;${orderData.discount.toFixed(2)}</span></div>` : ""}
+            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:14px;margin-top:2px;"><span>TOTAL:</span><span>&#8377;${orderData.total.toFixed(2)}</span></div>
           </div>
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="font-size:12px;">
-            <div style="display:flex;justify-content:space-between;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
-            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Cash Paid:</span><span>₹${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
-            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>₹${balance2.toFixed(2)}</span></div>` : ""}
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="font-size:11px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Payment:</span><span>${orderData.paymentMode === "qr" ? "QR Code" : "Cash"}</span></div>
+            ${orderData.paymentMode === "cash" && orderData.cashAmount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:1px;"><span>Cash Paid:</span><span>&#8377;${orderData.cashAmount.toFixed(2)}</span></div>` : ""}
+            ${balance2 > 0 ? `<div style="display:flex;justify-content:space-between;font-weight:bold;"><span>Balance:</span><span>&#8377;${balance2.toFixed(2)}</span></div>` : ""}
             ${s.gstinEnabled && s.gstin ? `<div style="display:flex;justify-content:space-between;"><span>GSTIN:</span><span>${s.gstin}</span></div>` : ""}
           </div>
           ${
             s.showQrOnBill && billQrDataUrl
-              ? `
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="text-align:center;padding:8px 0;">
-            <p style="font-size:11px;color:#666;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
-            <img src="${billQrDataUrl}" style="width:120px;height:120px;" />
-            <p style="font-size:11px;color:#666;margin:4px 0 0 0;">${s.upiId}</p>
+              ? `<hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="text-align:center;padding:6px 0;">
+            <p style="font-size:10px;color:#555;margin:0 0 4px 0;">${s.qrNote || "Scan to Pay"}</p>
+            <img src="${billQrDataUrl}" style="width:110px;height:110px;" />
+            <p style="font-size:10px;color:#555;margin:4px 0 0 0;">${s.upiId}</p>
           </div>`
               : ""
           }
-          <hr style="border:none;border-top:1px solid #999;margin:8px 0;" />
-          <div style="text-align:center;font-size:13px;">
-            <p style="font-weight:bold;margin:4px 0;">Thank You!</p>
-            <p style="margin:2px 0;">Visit Again, Come Again!</p>
-            <hr style="border:none;border-top:1px solid #ccc;margin:6px 0;" />
-            <p style="font-weight:600;margin:2px 0;">Powered By Medwin Techs Thanjavur</p>
-            <p style="opacity:0.5;font-size:10px;margin:2px 0;">medwin2105@gmail.com</p>
+          <hr style="border:none;border-top:1px dashed #999;margin:6px 0;" />
+          <div style="text-align:center;font-size:12px;">
+            <p style="font-weight:bold;margin:3px 0;">Thank You!</p>
+            <p style="margin:2px 0;font-size:11px;">Visit Again, Come Again!</p>
+            <hr style="border:none;border-top:1px solid #ccc;margin:5px 0;" />
+            <p style="font-weight:600;margin:2px 0;font-size:11px;">Powered By Medwin Techs Thanjavur</p>
+            <p style="opacity:0.5;font-size:9px;margin:2px 0;">medwin2105@gmail.com</p>
           </div>
         </div>
       `;
 
-      // Wait for images to load
-      await new Promise((r) => setTimeout(r, 300));
+      // Create container positioned just off viewport top (not -9999px) for reliable rendering
+      const container = document.createElement("div");
+      container.style.cssText = [
+        "position:fixed",
+        "top:0",
+        "left:0",
+        "width:320px",
+        "background:#ffffff",
+        "color:#000000",
+        "font-family:'Courier New',Courier,monospace",
+        "font-size:13px",
+        "line-height:1.5",
+        "z-index:-9999",
+        "opacity:0",
+        "pointer-events:none",
+      ].join(";");
+      container.innerHTML = billInnerHtml;
+      document.body.appendChild(container);
+
+      // Wait for images to load inside container
+      const imgs = container.querySelectorAll("img");
+      if (imgs.length > 0) {
+        await Promise.all(
+          Array.from(imgs).map(
+            (img) =>
+              new Promise<void>((resolve) => {
+                if (img.complete) {
+                  resolve();
+                } else {
+                  img.onload = () => resolve();
+                  img.onerror = () => resolve();
+                }
+              }),
+          ),
+        );
+      }
+      // Extra settle time
+      await new Promise((r) => setTimeout(r, 150));
 
       const dataUrl = await toPng(container, {
         backgroundColor: "#ffffff",
         pixelRatio: 2,
+        width: 320,
       });
 
       document.body.removeChild(container);
@@ -2632,29 +2745,7 @@ function BillingPage({
         </Dialog>
       )}
 
-      {/* PRINT AREA — hidden on screen, shown only during print via @media print */}
-      <div
-        id="bill-print-area"
-        aria-hidden="true"
-        style={{
-          position: "absolute",
-          left: "-9999px",
-          top: 0,
-          width: "380px",
-          background: "#ffffff",
-          overflow: "hidden",
-          pointerEvents: "none",
-        }}
-      >
-        {completedOrder && (
-          <BillContent
-            order={completedOrder}
-            settings={settings}
-            darkMode={false}
-            qrDataUrl={billQrDataUrl}
-          />
-        )}
-      </div>
+      {/* Print area removed — printing is handled via iframe injection */}
 
       {/* BARCODE SCANNER MODAL */}
       <BarcodeScannerModal
