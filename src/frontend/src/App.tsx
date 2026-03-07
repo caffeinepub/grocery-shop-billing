@@ -46,12 +46,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useActor } from "@/hooks/useActor";
-import {
-  BarcodeFormat,
-  BrowserMultiFormatReader,
-  DecodeHintType,
-  NotFoundException,
-} from "@zxing/library";
+// @zxing/library is loaded dynamically at runtime (CDN fallback) — no static import
 import {
   BarChart2,
   Camera,
@@ -76,7 +71,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import QRCode from "qrcode";
+// qrcode is loaded dynamically at runtime — no static import
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -1131,14 +1126,20 @@ function SlideNav({
 }
 
 // =============================================================================
-// FAST BARCODE SCANNER HOOK
-// Uses native BarcodeDetector API (very fast, ~100ms per frame) when available,
-// falls back to ZXing decodeFromStream for wider compatibility.
+// BARCODE SCANNER — rebuilt with QuaggaJS (CDN) + native BarcodeDetector
+// Strategy:
+//   1. Load QuaggaJS from CDN once (cached on window.__Quagga)
+//   2. Use Quagga.init() which creates its own <video>+<canvas> inside a container
+//   3. Native BarcodeDetector fallback polls the <video> that Quagga created
+// This avoids all srcObject / readyState / portal-timing issues.
 // =============================================================================
 
-// Extend window type for BarcodeDetector
 declare global {
   interface Window {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    Quagga: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    __QuaggaLoading: Promise<any> | null;
     BarcodeDetector: new (options?: { formats: string[] }) => {
       detect: (
         source: HTMLVideoElement | HTMLCanvasElement | ImageBitmap,
@@ -1147,219 +1148,263 @@ declare global {
   }
 }
 
-function useFastBarcodeScanner({
+// Load QuaggaJS from CDN — resolves to window.Quagga
+function loadQuagga(): Promise<void> {
+  if (window.Quagga) return Promise.resolve();
+  if (window.__QuaggaLoading) return window.__QuaggaLoading;
+  window.__QuaggaLoading = new Promise<void>((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js";
+    s.async = true;
+    s.onload = () => {
+      window.__QuaggaLoading = null;
+      resolve();
+    };
+    s.onerror = () => reject(new Error("Failed to load QuaggaJS"));
+    document.head.appendChild(s);
+  });
+  return window.__QuaggaLoading!;
+}
+
+// ---------------------------------------------------------------------------
+// Main scanner hook
+// ---------------------------------------------------------------------------
+function useBarcodeScanner({
   active,
+  containerId,
   onDetected,
-  onError,
 }: {
   active: boolean;
+  containerId: string;
   onDetected: (code: string) => void;
-  onError: (msg: string) => void;
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [status, setStatus] = useState<
+    "idle" | "loading" | "scanning" | "error"
+  >("idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const isActiveRef = useRef(false);
   const detectedRef = useRef(false);
-  const [isInitializing, setIsInitializing] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const quaggaRunning = useRef(false);
+  const onDetectedRef = useRef(onDetected);
+  onDetectedRef.current = onDetected;
 
-  const stopAll = useCallback(() => {
+  const stopScanner = useCallback(() => {
     isActiveRef.current = false;
-    if (rafRef.current != null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-    if (timerRef.current != null) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    if (readerRef.current) {
+    if (quaggaRunning.current && window.Quagga) {
       try {
-        readerRef.current.reset();
+        window.Quagga.offDetected();
+        window.Quagga.stop();
       } catch {
         /**/
       }
-      readerRef.current = null;
+      quaggaRunning.current = false;
     }
-    if (streamRef.current) {
-      for (const t of streamRef.current.getTracks()) t.stop();
-      streamRef.current = null;
-    }
-    if (videoRef.current) videoRef.current.srcObject = null;
     detectedRef.current = false;
-    setIsInitializing(false);
+    setStatus("idle");
   }, []);
 
-  const startScanning = useCallback(async () => {
-    if (!videoRef.current) return;
-    setCameraError(null);
-    setIsInitializing(true);
+  const startScanner = useCallback(async () => {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
     isActiveRef.current = true;
     detectedRef.current = false;
+    setErrorMsg(null);
+    setStatus("loading");
 
-    // Helper to acquire camera stream with fallback constraints
-    const acquireStream = async (): Promise<MediaStream> => {
+    // ── Step 1: load QuaggaJS ──────────────────────────────────────────────
+    try {
+      await loadQuagga();
+    } catch {
+      if (!isActiveRef.current) return;
+      setErrorMsg("Could not load scanner library. Check your connection.");
+      setStatus("error");
+      return;
+    }
+    if (!isActiveRef.current) return;
+
+    const Quagga = window.Quagga;
+
+    // ── Step 2: request camera permission explicitly first ─────────────────
+    // This surfaces a user-friendly error before Quagga tries anything.
+    let stream: MediaStream | null = null;
+    try {
+      // Try rear camera first (mobile), fallback to any camera (desktop)
       try {
-        return await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-          audio: false,
-        });
-      } catch {
-        // Fallback to basic rear camera constraint
-        return await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: "environment" } },
           audio: false,
         });
-      }
-    };
-
-    try {
-      const stream = await acquireStream();
-      if (!isActiveRef.current) {
-        for (const t of stream.getTracks()) t.stop();
-        return;
-      }
-      streamRef.current = stream;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-      setIsInitializing(false);
-
-      // --- Strategy 1: native BarcodeDetector (Chrome/Android, very fast) ---
-      if (typeof window !== "undefined" && "BarcodeDetector" in window) {
-        const detector = new window.BarcodeDetector({
-          formats: [
-            "ean_13",
-            "ean_8",
-            "upc_a",
-            "upc_e",
-            "code_128",
-            "code_39",
-            "code_93",
-            "qr_code",
-            "data_matrix",
-            "itf",
-            "codabar",
-            "code_93",
-            "aztec",
-            "pdf417",
-          ],
-        });
-        const poll = async () => {
-          if (!isActiveRef.current || detectedRef.current) return;
-          if (videoRef.current && videoRef.current.readyState >= 2) {
-            try {
-              const results = await detector.detect(videoRef.current);
-              if (results.length > 0 && !detectedRef.current) {
-                detectedRef.current = true;
-                onDetected(results[0].rawValue);
-                return;
-              }
-            } catch {
-              /**/
-            }
-          }
-          if (isActiveRef.current) rafRef.current = requestAnimationFrame(poll);
-        };
-        rafRef.current = requestAnimationFrame(poll);
-      } else {
-        // --- Strategy 2: ZXing fallback with TRY_HARDER hints ---
-        const hints = new Map();
-        hints.set(DecodeHintType.TRY_HARDER, true);
-        hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-          BarcodeFormat.EAN_13,
-          BarcodeFormat.EAN_8,
-          BarcodeFormat.UPC_A,
-          BarcodeFormat.UPC_E,
-          BarcodeFormat.CODE_128,
-          BarcodeFormat.CODE_39,
-          BarcodeFormat.CODE_93,
-          BarcodeFormat.ITF,
-          BarcodeFormat.CODABAR,
-          BarcodeFormat.QR_CODE,
-          BarcodeFormat.DATA_MATRIX,
-          BarcodeFormat.AZTEC,
-          BarcodeFormat.PDF_417,
-        ]);
-        const reader = new BrowserMultiFormatReader(hints);
-        readerRef.current = reader;
-        reader.decodeFromStream(stream, videoRef.current, (result, err) => {
-          if (!isActiveRef.current || detectedRef.current) return;
-          if (result) {
-            detectedRef.current = true;
-            onDetected(result.getText());
-          }
-          if (err && !(err instanceof NotFoundException)) {
-            console.debug("ZXing decode error:", err);
-          }
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
         });
       }
+      // Stop the test stream — Quagga will open its own
+      for (const t of stream.getTracks()) t.stop();
+      stream = null;
     } catch (err: unknown) {
       if (!isActiveRef.current) return;
-      const msg = err instanceof Error ? err.message : "Camera access failed";
-      let friendly = `Camera error: ${msg}`;
+      const msg = err instanceof Error ? err.message : "";
       if (
         msg.toLowerCase().includes("permission") ||
         msg.toLowerCase().includes("denied") ||
         msg.toLowerCase().includes("notallowed")
       ) {
-        friendly =
-          "Camera permission denied. Please allow camera access and try again.";
+        setErrorMsg("Camera permission denied. Please allow camera access.");
       } else if (
         msg.toLowerCase().includes("notfound") ||
-        msg.toLowerCase().includes("no camera")
+        msg.toLowerCase().includes("devicenotfound")
       ) {
-        friendly = "No camera found on this device.";
+        setErrorMsg("No camera detected on this device.");
+      } else {
+        setErrorMsg(`Camera access failed: ${msg}`);
       }
-      setCameraError(friendly);
-      onError(friendly);
-      setIsInitializing(false);
-    }
-  }, [onDetected, onError]);
-
-  useEffect(() => {
-    if (!active) {
-      stopAll();
-      setCameraError(null);
+      setStatus("error");
       return;
     }
-    let raf: number;
-    const tryStart = () => {
-      if (videoRef.current) {
-        startScanning();
-      } else {
-        raf = requestAnimationFrame(tryStart);
-      }
-    };
-    raf = requestAnimationFrame(tryStart);
-    return () => {
-      cancelAnimationFrame(raf);
-      stopAll();
-    };
-  }, [active, startScanning, stopAll]);
+    if (!isActiveRef.current) return;
+
+    // ── Step 3: init Quagga inside the container ───────────────────────────
+    // Clear any leftover DOM from previous session
+    container.innerHTML = "";
+
+    await new Promise<void>((resolve, reject) => {
+      Quagga.init(
+        {
+          inputStream: {
+            name: "Live",
+            type: "LiveStream",
+            target: container,
+            constraints: {
+              facingMode: "environment",
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+          },
+          decoder: {
+            readers: [
+              "ean_reader",
+              "ean_8_reader",
+              "upc_reader",
+              "upc_e_reader",
+              "code_128_reader",
+              "code_39_reader",
+              "code_93_reader",
+              "codabar_reader",
+              "i2of5_reader",
+            ],
+            debug: { showCanvas: false, showPatches: false },
+          },
+          locate: true,
+          numOfWorkers: navigator.hardwareConcurrency
+            ? Math.min(navigator.hardwareConcurrency, 4)
+            : 2,
+          frequency: 10, // ~10 decode attempts/s — balanced performance
+        },
+        (err: Error | null) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        },
+      );
+    }).catch((err: unknown) => {
+      if (!isActiveRef.current) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`Scanner could not start: ${msg}`);
+      setStatus("error");
+      isActiveRef.current = false;
+    });
+
+    if (!isActiveRef.current) return;
+
+    // Style the video Quagga inserted so it fills the container
+    const video = container.querySelector("video");
+    if (video) {
+      video.setAttribute("playsinline", "true");
+      video.setAttribute("muted", "true");
+      video.style.cssText =
+        "width:100%;height:100%;object-fit:cover;display:block;";
+    }
+    const canvas = container.querySelector("canvas");
+    if (canvas) {
+      canvas.style.cssText = "display:none;";
+    }
+
+    Quagga.start();
+    quaggaRunning.current = true;
+    setStatus("scanning");
+
+    // ── Step 4: listen for detections ─────────────────────────────────────
+    Quagga.onDetected((data: { codeResult: { code: string } }) => {
+      if (!isActiveRef.current || detectedRef.current) return;
+      const code = data?.codeResult?.code;
+      if (!code) return;
+      detectedRef.current = true;
+      stopScanner();
+      onDetectedRef.current(code);
+    });
+  }, [containerId, stopScanner]);
 
   const resetDetection = useCallback(() => {
     detectedRef.current = false;
   }, []);
 
+  // Start / stop based on `active`
+  useEffect(() => {
+    if (!active) {
+      stopScanner();
+      setErrorMsg(null);
+      return;
+    }
+
+    // Wait for the dialog portal to fully mount the container div
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+
+    const tryStart = () => {
+      if (cancelled) return;
+      attempts++;
+      const el = document.getElementById(containerId);
+      if (el) {
+        startScanner();
+      } else if (attempts < 60) {
+        timer = setTimeout(tryStart, 50);
+      } else {
+        setErrorMsg(
+          "Scanner could not initialise. Please close and try again.",
+        );
+        setStatus("error");
+      }
+    };
+
+    timer = setTimeout(tryStart, 80); // give Dialog portal time to render
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      stopScanner();
+    };
+    // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally only re-runs on active change
+  }, [active, containerId, startScanner, stopScanner]);
+
   return {
-    videoRef,
-    isInitializing,
-    cameraError,
-    setCameraError,
-    startScanning,
-    stopAll,
+    status,
+    errorMsg,
+    setErrorMsg,
+    startScanner,
+    stopScanner,
     resetDetection,
   };
 }
 
-// Shared UI for file upload in both scanner dialogs
+// ---------------------------------------------------------------------------
+// Shared upload-image barcode reader (static image, no camera)
+// ---------------------------------------------------------------------------
 function ScannerUploadSection({
   onDetected,
   uploadProcessing,
@@ -1395,7 +1440,8 @@ function ScannerUploadSection({
         imgEl.onload = () => resolve();
         imgEl.onerror = () => reject(new Error("Failed to load image"));
       });
-      // Try native BarcodeDetector first
+
+      // Try native BarcodeDetector
       if (typeof window !== "undefined" && "BarcodeDetector" in window) {
         try {
           const bitmap = await createImageBitmap(imgEl);
@@ -1422,15 +1468,39 @@ function ScannerUploadSection({
           /**/
         }
       }
-      // ZXing fallback
-      const uploadReader = new BrowserMultiFormatReader();
+
+      // Quagga static decode fallback
       try {
-        const result = await uploadReader.decodeFromImageElement(imgEl);
-        onDetected(result.getText());
+        await loadQuagga();
+        const Quagga = window.Quagga;
+        await new Promise<void>((resolve, reject) => {
+          Quagga.decodeSingle(
+            {
+              decoder: {
+                readers: [
+                  "ean_reader",
+                  "ean_8_reader",
+                  "upc_reader",
+                  "upc_e_reader",
+                  "code_128_reader",
+                  "code_39_reader",
+                ],
+              },
+              locate: true,
+              src: dataUrl,
+            },
+            (result: { codeResult?: { code?: string } } | null) => {
+              if (result?.codeResult?.code) {
+                onDetected(result.codeResult.code);
+                resolve();
+              } else {
+                reject(new Error("not found"));
+              }
+            },
+          );
+        });
       } catch {
         setUploadError("No barcode found in image. Try a clearer photo.");
-      } finally {
-        uploadReader.reset();
       }
     } catch {
       setUploadError("Failed to read image file.");
@@ -1493,68 +1563,86 @@ function ScannerUploadSection({
   );
 }
 
-// Shared camera viewfinder UI
+// ---------------------------------------------------------------------------
+// Camera viewfinder — Quagga renders video INSIDE the container div
+// ---------------------------------------------------------------------------
 function ScannerCameraView({
-  videoRef,
-  isInitializing,
-  cameraError,
+  containerId,
+  status,
+  errorMsg,
   onRetry,
   ocidPrefix,
 }: {
-  videoRef: React.RefObject<HTMLVideoElement | null>;
-  isInitializing: boolean;
-  cameraError: string | null;
+  containerId: string;
+  status: "idle" | "loading" | "scanning" | "error";
+  errorMsg: string | null;
   onRetry: () => void;
   ocidPrefix: string;
 }) {
   return (
-    <div className="relative bg-black" style={{ aspectRatio: "4/3" }}>
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        className="w-full h-full object-cover"
-        style={{ display: cameraError ? "none" : "block" }}
+    <div
+      className="relative bg-black w-full"
+      style={{ aspectRatio: "4/3", maxHeight: "60vh" }}
+    >
+      {/* Quagga injects its <video> and <canvas> here */}
+      <div
+        id={containerId}
+        className="absolute inset-0 w-full h-full overflow-hidden"
+        style={{ background: "#000" }}
       />
-      {!cameraError && !isInitializing && (
+
+      {/* Scanning overlay — only shown when actively scanning */}
+      {status === "scanning" && (
         <>
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="relative w-56 h-40">
-              <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
-              <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
-              <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
-              <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
-              <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
+            <div className="relative w-[min(240px,65%)] aspect-[7/4]">
+              {/* Corner brackets */}
+              <div className="absolute top-0 left-0 w-8 h-8 border-t-[3px] border-l-[3px] border-green-400 rounded-tl" />
+              <div className="absolute top-0 right-0 w-8 h-8 border-t-[3px] border-r-[3px] border-green-400 rounded-tr" />
+              <div className="absolute bottom-0 left-0 w-8 h-8 border-b-[3px] border-l-[3px] border-green-400 rounded-bl" />
+              <div className="absolute bottom-0 right-0 w-8 h-8 border-b-[3px] border-r-[3px] border-green-400 rounded-br" />
+              {/* Animated scan line */}
+              <div
+                className="absolute left-1 right-1 h-0.5 bg-green-400 shadow-[0_0_6px_2px_#4ade80]"
+                style={{
+                  animation: "scanline 2s ease-in-out infinite",
+                  top: 0,
+                }}
+              />
             </div>
           </div>
-          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-center py-1 pointer-events-none">
-            <span className="text-xs text-green-400 animate-pulse">
-              ● Scanning...
+          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-center py-2 pointer-events-none">
+            <span className="text-xs text-green-400 font-medium tracking-wide animate-pulse">
+              ● Scanning Barcode...
             </span>
           </div>
         </>
       )}
-      {isInitializing && (
+
+      {/* Loading state */}
+      {status === "loading" && (
         <div
           data-ocid={`${ocidPrefix}.camera.loading_state`}
-          className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3"
+          className="absolute inset-0 flex flex-col items-center justify-center bg-black gap-3 z-10"
         >
-          <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm text-muted-foreground">Starting camera…</p>
+          <div className="w-10 h-10 border-4 border-green-400 border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm text-green-300 font-medium">Starting camera…</p>
+          <p className="text-xs text-gray-400">Please allow camera access</p>
         </div>
       )}
-      {cameraError && (
+
+      {/* Error state */}
+      {status === "error" && (
         <div
           data-ocid={`${ocidPrefix}.camera.error_state`}
-          className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-3 px-6 text-center"
+          className="absolute inset-0 flex flex-col items-center justify-center bg-black gap-4 px-6 text-center z-10"
         >
-          <X className="w-10 h-10 text-destructive" />
-          <p className="text-sm text-destructive font-medium">{cameraError}</p>
+          <X className="w-12 h-12 text-red-400" />
+          <p className="text-sm text-red-400 font-medium">{errorMsg}</p>
           <Button
             size="sm"
             variant="outline"
-            className="border-border mt-1"
+            className="border-green-600 text-green-400 hover:bg-green-900/30 mt-1"
             onClick={onRetry}
           >
             Retry
@@ -1581,6 +1669,7 @@ function BarcodeScannerForInput({
   onResult,
   playSound,
 }: BarcodeScannerForInputProps) {
+  const CONTAINER_ID = "quagga-input-scanner";
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadProcessing, setUploadProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1595,31 +1684,21 @@ function BarcodeScannerForInput({
     [onResult, onClose, playSound],
   );
 
-  const {
-    videoRef,
-    isInitializing,
-    cameraError,
-    setCameraError,
-    startScanning,
-  } = useFastBarcodeScanner({
+  const { status, errorMsg, setErrorMsg, startScanner } = useBarcodeScanner({
     active: open,
+    containerId: CONTAINER_ID,
     onDetected: handleDetected,
-    onError: () => {},
   });
 
   useEffect(() => {
-    if (!open) {
-      setUploadError(null);
-    }
+    if (!open) setUploadError(null);
   }, [open]);
-
-  if (!open) return null;
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent
         data-ocid="barcode_input_scanner.dialog"
-        className="bg-card border-border max-w-sm p-0 overflow-hidden"
+        className="bg-card border-border w-[95vw] max-w-md sm:max-w-lg p-0 overflow-hidden overflow-y-auto max-h-[90vh]"
       >
         <DialogHeader className="px-4 pt-4 pb-2">
           <DialogTitle className="flex items-center gap-2 text-primary">
@@ -1627,21 +1706,24 @@ function BarcodeScannerForInput({
             Scan Barcode
           </DialogTitle>
         </DialogHeader>
+
         <ScannerCameraView
-          videoRef={videoRef}
-          isInitializing={isInitializing}
-          cameraError={cameraError}
+          containerId={CONTAINER_ID}
+          status={status}
+          errorMsg={errorMsg}
           onRetry={() => {
-            setCameraError(null);
-            startScanning();
+            setErrorMsg(null);
+            startScanner();
           }}
           ocidPrefix="barcode_input_scanner"
         />
-        <div className="p-3 flex items-center bg-card border-b border-border">
+
+        <div className="px-4 py-2 bg-card border-b border-border">
           <p className="text-xs text-muted-foreground">
-            Point rear camera at barcode
+            Point the rear camera at a barcode to scan automatically
           </p>
         </div>
+
         <ScannerUploadSection
           onDetected={handleDetected}
           uploadProcessing={uploadProcessing}
@@ -1651,11 +1733,12 @@ function BarcodeScannerForInput({
           fileInputRef={fileInputRef}
           ocidPrefix="barcode_input_scanner"
         />
-        <div className="px-4 pb-4 pt-0">
+
+        <div className="px-4 pb-4 pt-1">
           <Button
             data-ocid="barcode_input_scanner.back.button"
             variant="outline"
-            className="w-full border-border gap-2"
+            className="w-full border-border gap-2 py-3 text-base"
             onClick={onClose}
           >
             <ChevronLeft className="w-4 h-4" />
@@ -1668,7 +1751,7 @@ function BarcodeScannerForInput({
 }
 
 // =============================================================================
-// BARCODE SCANNER MODAL
+// BARCODE SCANNER MODAL (Billing page — adds item to cart)
 // =============================================================================
 interface BarcodeScannerModalProps {
   open: boolean;
@@ -1685,11 +1768,10 @@ function BarcodeScannerModal({
   onAddToCart,
   playSound,
 }: BarcodeScannerModalProps) {
+  const CONTAINER_ID = "quagga-billing-scanner";
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadProcessing, setUploadProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const resetDetectionRef = useRef<(() => void) | null>(null);
 
   const handleDetected = useCallback(
     (code: string) => {
@@ -1704,44 +1786,26 @@ function BarcodeScannerModal({
       } else {
         playSound?.("itemNotFound");
         toast.error(`Item not found for barcode: ${code}`);
-        // Reset detection after 2s so user can scan again automatically
-        setTimeout(() => {
-          resetDetectionRef.current?.();
-        }, 2000);
       }
     },
     [menuItems, onAddToCart, onClose, playSound],
   );
 
-  const {
-    videoRef,
-    isInitializing,
-    cameraError,
-    setCameraError,
-    startScanning,
-    resetDetection,
-  } = useFastBarcodeScanner({
+  const { status, errorMsg, setErrorMsg, startScanner } = useBarcodeScanner({
     active: open,
+    containerId: CONTAINER_ID,
     onDetected: handleDetected,
-    onError: () => {},
   });
 
-  // Keep ref in sync
-  resetDetectionRef.current = resetDetection;
-
   useEffect(() => {
-    if (!open) {
-      setUploadError(null);
-    }
+    if (!open) setUploadError(null);
   }, [open]);
-
-  if (!open) return null;
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent
         data-ocid="scanner.dialog"
-        className="bg-card border-border max-w-sm p-0 overflow-hidden"
+        className="bg-card border-border w-[95vw] max-w-md sm:max-w-lg p-0 overflow-hidden overflow-y-auto max-h-[90vh]"
       >
         <DialogHeader className="px-4 pt-4 pb-2">
           <DialogTitle className="flex items-center gap-2 text-primary">
@@ -1749,21 +1813,24 @@ function BarcodeScannerModal({
             Barcode Scanner
           </DialogTitle>
         </DialogHeader>
+
         <ScannerCameraView
-          videoRef={videoRef}
-          isInitializing={isInitializing}
-          cameraError={cameraError}
+          containerId={CONTAINER_ID}
+          status={status}
+          errorMsg={errorMsg}
           onRetry={() => {
-            setCameraError(null);
-            startScanning();
+            setErrorMsg(null);
+            startScanner();
           }}
           ocidPrefix="scanner"
         />
-        <div className="p-3 flex items-center bg-card border-b border-border">
+
+        <div className="px-4 py-2 bg-card border-b border-border">
           <p className="text-xs text-muted-foreground">
-            Point rear camera at barcode
+            Point the rear camera at a product barcode to add it to the cart
           </p>
         </div>
+
         <ScannerUploadSection
           onDetected={handleDetected}
           uploadProcessing={uploadProcessing}
@@ -1773,11 +1840,12 @@ function BarcodeScannerModal({
           fileInputRef={fileInputRef}
           ocidPrefix="scanner"
         />
-        <div className="px-4 pb-4 pt-0">
+
+        <div className="px-4 pb-4 pt-1">
           <Button
             data-ocid="scanner.back.button"
             variant="outline"
-            className="w-full border-border gap-2"
+            className="w-full border-border gap-2 py-3 text-base"
             onClick={onClose}
           >
             <ChevronLeft className="w-4 h-4" />
@@ -1960,6 +2028,13 @@ function BillingPage({
     if (settings.upiId) {
       try {
         const upiString = `upi://pay?pa=${encodeURIComponent(settings.upiId)}&pn=${encodeURIComponent(settings.shopName)}&am=${order.total}&cu=INR`;
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const {
+          default: QRCode,
+        }: { default: typeof import("qrcode")["default"] } = await new Function(
+          "u",
+          "return import(u)",
+        )("https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js");
         const qrUrl = await QRCode.toDataURL(upiString, {
           width: 200,
           margin: 1,
@@ -2124,7 +2199,11 @@ function BillingPage({
   const handleDownloadBill = async () => {
     if (!completedOrder) return;
     try {
-      const { toPng } = await import("html-to-image");
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const { toPng }: typeof import("html-to-image") = await new Function(
+        "u",
+        "return import(u)",
+      )("https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/es/index.js");
       const orderData = completedOrder;
       const s = settings;
       const balance2 =
