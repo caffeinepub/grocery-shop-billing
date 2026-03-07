@@ -1266,77 +1266,105 @@ function useBarcodeScanner({
     }
     if (!isActiveRef.current) return;
 
-    // ── Step 3: init Quagga inside the container ───────────────────────────
+    // ── Step 3: init Quagga inside the container with auto-retry ──────────
     // Clear any leftover DOM from previous session
     container.innerHTML = "";
 
-    await new Promise<void>((resolve, reject) => {
-      Quagga.init(
-        {
-          inputStream: {
-            name: "Live",
-            type: "LiveStream",
-            target: container,
-            constraints: {
-              facingMode: "environment",
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-          },
-          decoder: {
-            readers: [
-              "ean_reader",
-              "ean_8_reader",
-              "upc_reader",
-              "upc_e_reader",
-              "code_128_reader",
-              "code_39_reader",
-              "code_93_reader",
-              "codabar_reader",
-              "i2of5_reader",
-            ],
-            debug: { showCanvas: false, showPatches: false },
-          },
-          locate: true,
-          numOfWorkers: navigator.hardwareConcurrency
-            ? Math.min(navigator.hardwareConcurrency, 4)
-            : 2,
-          frequency: 10, // ~10 decode attempts/s — balanced performance
-        },
-        (err: Error | null) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve();
-          }
-        },
-      );
-    }).catch((err: unknown) => {
+    const MAX_RETRIES = 3;
+    let initSuccess = false;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (!isActiveRef.current) return;
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg(`Scanner could not start: ${msg}`);
-      setStatus("error");
-      isActiveRef.current = false;
-    });
 
-    if (!isActiveRef.current) return;
+      if (attempt > 1) {
+        setErrorMsg(
+          `Camera initialization failed. Retrying... (${attempt}/${MAX_RETRIES})`,
+        );
+        setStatus("loading");
+        await new Promise((r) => setTimeout(r, 1000));
+        if (!isActiveRef.current) return;
+        // Clear container for fresh init
+        container.innerHTML = "";
+      }
 
-    // Style the video Quagga inserted so it fills the container
-    const video = container.querySelector("video");
-    if (video) {
-      video.setAttribute("playsinline", "true");
-      video.setAttribute("muted", "true");
-      video.style.cssText =
-        "width:100%;height:100%;object-fit:cover;display:block;";
+      try {
+        await new Promise<void>((resolve, reject) => {
+          Quagga.init(
+            {
+              inputStream: {
+                name: "Live",
+                type: "LiveStream",
+                target: container,
+                constraints: {
+                  facingMode: "environment",
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                },
+              },
+              decoder: {
+                readers: [
+                  "ean_reader",
+                  "ean_8_reader",
+                  "upc_reader",
+                  "upc_e_reader",
+                  "code_128_reader",
+                  "code_39_reader",
+                  "code_93_reader",
+                  "codabar_reader",
+                  "i2of5_reader",
+                ],
+                debug: { showCanvas: false, showPatches: false },
+              },
+              locate: true,
+              numOfWorkers: navigator.hardwareConcurrency
+                ? Math.min(navigator.hardwareConcurrency, 4)
+                : 2,
+              frequency: 15, // ~15 decode attempts/s for faster detection
+            },
+            (err: Error | null) => {
+              if (err) reject(err);
+              else resolve();
+            },
+          );
+        });
+        initSuccess = true;
+        break; // success, exit retry loop
+      } catch (initErr) {
+        if (attempt === MAX_RETRIES) {
+          if (!isActiveRef.current) return;
+          const msg =
+            initErr instanceof Error ? initErr.message : String(initErr);
+          setErrorMsg(`Scanner could not start: ${msg}`);
+          setStatus("error");
+          isActiveRef.current = false;
+          return;
+        }
+        // will retry in next loop iteration
+      }
     }
-    const canvas = container.querySelector("canvas");
-    if (canvas) {
-      canvas.style.cssText = "display:none;";
-    }
+
+    if (!initSuccess || !isActiveRef.current) return;
 
     Quagga.start();
     quaggaRunning.current = true;
     setStatus("scanning");
+
+    // Force video playback — needed on iOS/Android
+    const videoEl = container.querySelector("video");
+    if (videoEl) {
+      videoEl.setAttribute("playsinline", "true");
+      videoEl.setAttribute("muted", "true");
+      videoEl.setAttribute("autoplay", "true");
+      videoEl.style.cssText =
+        "width:100%;height:100%;object-fit:cover;display:block;";
+      videoEl.play().catch(() => {
+        /* ignore */
+      });
+    }
+    const canvasEl = container.querySelector("canvas");
+    if (canvasEl) {
+      (canvasEl as HTMLCanvasElement).style.cssText = "display:none;";
+    }
 
     // ── Step 4: listen for detections ─────────────────────────────────────
     Quagga.onDetected((data: { codeResult: { code: string } }) => {
@@ -1346,6 +1374,11 @@ function useBarcodeScanner({
       detectedRef.current = true;
       stopScanner();
       onDetectedRef.current(code);
+    });
+
+    // Keep scanning loop alive — do nothing on missed frames
+    Quagga.onProcessed(() => {
+      /* intentionally empty — keeps detection loop running */
     });
   }, [containerId, stopScanner]);
 
@@ -1579,6 +1612,23 @@ function ScannerCameraView({
   onRetry: () => void;
   ocidPrefix: string;
 }) {
+  // Inject @keyframes scanline once into document head
+  useEffect(() => {
+    const styleId = "barcode-scanline-keyframes";
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        @keyframes scanline {
+          0%   { top: 2px; }
+          50%  { top: calc(100% - 4px); }
+          100% { top: 2px; }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+  }, []);
+
   return (
     <div
       className="relative bg-black w-full"
