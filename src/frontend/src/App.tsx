@@ -46,7 +46,12 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useActor } from "@/hooks/useActor";
-import { BrowserMultiFormatReader, NotFoundException } from "@zxing/library";
+import {
+  BarcodeFormat,
+  BrowserMultiFormatReader,
+  DecodeHintType,
+  NotFoundException,
+} from "@zxing/library";
 import {
   BarChart2,
   Camera,
@@ -68,6 +73,7 @@ import {
   Trash2,
   UserCog,
   Users,
+  Volume2,
   X,
 } from "lucide-react";
 import QRCode from "qrcode";
@@ -142,6 +148,7 @@ const LS_USERS = "groc_users";
 const LS_MENU = "groc_menu";
 const LS_ORDERS = "groc_orders";
 const LS_ORDER_COUNTER = "groc_order_counter";
+const LS_SOUNDS = "groc_sounds";
 const SESSION_KEY = "groc_session";
 const SESSION_ROLE_KEY = "groc_session_role";
 
@@ -176,10 +183,17 @@ const ROLE_PAGES: Record<UserRole, Page[]> = {
     "customer-details",
     "settings",
     "manage-users",
+    "sounds",
   ],
-  manager: ["billing", "manage-menu", "sales-report", "customer-details"],
+  manager: [
+    "billing",
+    "manage-menu",
+    "sales-report",
+    "customer-details",
+    "sounds",
+  ],
   cashier: ["billing"],
-  accountant: ["billing", "sales-report", "customer-details"],
+  accountant: ["billing", "sales-report", "customer-details", "sounds"],
 };
 
 const DEFAULT_MENU: MenuItem[] = [
@@ -267,6 +281,135 @@ function downloadCSV(filename: string, content: string): void {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// =============================================================================
+// SOUND SYSTEM
+// =============================================================================
+interface SoundSettings {
+  enabled: boolean;
+  volume: number; // 0–100
+  scan: boolean;
+  login: boolean;
+  logout: boolean;
+  payment: boolean;
+  doneClose: boolean;
+  addToCart: boolean;
+  error: boolean;
+  itemNotFound: boolean;
+}
+
+const DEFAULT_SOUND_SETTINGS: SoundSettings = {
+  enabled: true,
+  volume: 80,
+  scan: true,
+  login: true,
+  logout: true,
+  payment: true,
+  doneClose: true,
+  addToCart: true,
+  error: true,
+  itemNotFound: true,
+};
+
+type SoundEvent = keyof Omit<SoundSettings, "enabled" | "volume">;
+
+function useSoundSystem() {
+  const soundSettings = useRef<SoundSettings>(
+    loadLS(LS_SOUNDS, DEFAULT_SOUND_SETTINGS),
+  );
+
+  const playTone = useCallback(
+    (
+      frequency: number,
+      duration: number,
+      type: OscillatorType = "sine",
+      volume = 0.5,
+    ) => {
+      try {
+        const ctx = new (
+          window.AudioContext ||
+          (
+            window as unknown as {
+              webkitAudioContext: typeof AudioContext;
+            }
+          ).webkitAudioContext
+        )();
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        oscillator.type = type;
+        oscillator.frequency.value = frequency;
+        gainNode.gain.setValueAtTime(
+          volume * (soundSettings.current.volume / 100),
+          ctx.currentTime,
+        );
+        gainNode.gain.exponentialRampToValueAtTime(
+          0.001,
+          ctx.currentTime + duration,
+        );
+        oscillator.start(ctx.currentTime);
+        oscillator.stop(ctx.currentTime + duration);
+        oscillator.onended = () => ctx.close();
+      } catch {
+        /* silent */
+      }
+    },
+    [],
+  );
+
+  const playSound = useCallback(
+    (event: SoundEvent) => {
+      const s = soundSettings.current;
+      if (!s.enabled) return;
+      if (!s[event]) return;
+      const vol = s.volume / 100;
+      switch (event) {
+        case "scan":
+          playTone(880, 0.15, "sine", vol);
+          setTimeout(() => playTone(1100, 0.1, "sine", vol), 100);
+          break;
+        case "login":
+          playTone(523, 0.1, "sine", vol);
+          setTimeout(() => playTone(659, 0.1, "sine", vol), 120);
+          setTimeout(() => playTone(784, 0.2, "sine", vol), 240);
+          break;
+        case "logout":
+          playTone(784, 0.1, "sine", vol);
+          setTimeout(() => playTone(523, 0.2, "sine", vol), 120);
+          break;
+        case "payment":
+          playTone(523, 0.08, "sine", vol);
+          setTimeout(() => playTone(659, 0.08, "sine", vol), 100);
+          setTimeout(() => playTone(784, 0.08, "sine", vol), 200);
+          setTimeout(() => playTone(1047, 0.3, "sine", vol), 300);
+          break;
+        case "doneClose":
+          playTone(660, 0.15, "sine", vol);
+          setTimeout(() => playTone(880, 0.25, "sine", vol), 180);
+          break;
+        case "addToCart":
+          playTone(600, 0.1, "triangle", vol);
+          break;
+        case "error":
+          playTone(200, 0.2, "sawtooth", vol * 0.5);
+          break;
+        case "itemNotFound":
+          playTone(250, 0.15, "square", vol * 0.5);
+          setTimeout(() => playTone(200, 0.2, "square", vol * 0.5), 200);
+          break;
+      }
+    },
+    [playTone],
+  );
+
+  const updateSoundSettings = useCallback((newSettings: SoundSettings) => {
+    soundSettings.current = newSettings;
+    saveLS(LS_SOUNDS, newSettings);
+  }, []);
+
+  return { playSound, soundSettings, updateSoundSettings };
 }
 
 // =============================================================================
@@ -676,9 +819,10 @@ function ShareBillDialog({
 interface LoginPageProps {
   onLogin: (username: string, role: UserRole) => void;
   settings: AppSettings;
+  playSound?: (event: SoundEvent) => void;
 }
 
-function LoginPage({ onLogin, settings }: LoginPageProps) {
+function LoginPage({ onLogin, settings, playSound }: LoginPageProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -689,6 +833,7 @@ function LoginPage({ onLogin, settings }: LoginPageProps) {
       (u) => u.username === username && u.password === password,
     );
     if (user) {
+      playSound?.("login");
       sessionStorage.setItem(SESSION_KEY, username);
       sessionStorage.setItem(
         SESSION_ROLE_KEY,
@@ -696,6 +841,7 @@ function LoginPage({ onLogin, settings }: LoginPageProps) {
       );
       onLogin(username, (user.role as UserRole) || "cashier");
     } else {
+      playSound?.("error");
       setError("Invalid username or password");
     }
   };
@@ -865,7 +1011,8 @@ type Page =
   | "sales-report"
   | "customer-details"
   | "settings"
-  | "manage-users";
+  | "manage-users"
+  | "sounds";
 
 interface SlideNavProps {
   isOpen: boolean;
@@ -902,6 +1049,11 @@ const NAV_ITEMS: { id: Page; label: string; icon: React.ReactNode }[] = [
     label: "Manage Users",
     icon: <UserCog className="w-5 h-5" />,
   },
+  {
+    id: "sounds",
+    label: "Sounds",
+    icon: <Volume2 className="w-5 h-5" />,
+  },
 ];
 
 const NAV_OCIDS: Record<Page, string> = {
@@ -911,6 +1063,7 @@ const NAV_OCIDS: Record<Page, string> = {
   "customer-details": "nav.customers.link",
   settings: "nav.settings.link",
   "manage-users": "nav.users.link",
+  sounds: "nav.sounds.link",
 };
 
 function SlideNav({
@@ -1047,15 +1200,28 @@ function useFastBarcodeScanner({
     isActiveRef.current = true;
     detectedRef.current = false;
 
+    // Helper to acquire camera stream with fallback constraints
+    const acquireStream = async (): Promise<MediaStream> => {
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+      } catch {
+        // Fallback to basic rear camera constraint
+        return await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+      }
+    };
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
+      const stream = await acquireStream();
       if (!isActiveRef.current) {
         for (const t of stream.getTracks()) t.stop();
         return;
@@ -1079,6 +1245,10 @@ function useFastBarcodeScanner({
             "qr_code",
             "data_matrix",
             "itf",
+            "codabar",
+            "code_93",
+            "aztec",
+            "pdf417",
           ],
         });
         const poll = async () => {
@@ -1099,8 +1269,25 @@ function useFastBarcodeScanner({
         };
         rafRef.current = requestAnimationFrame(poll);
       } else {
-        // --- Strategy 2: ZXing fallback ---
-        const reader = new BrowserMultiFormatReader();
+        // --- Strategy 2: ZXing fallback with TRY_HARDER hints ---
+        const hints = new Map();
+        hints.set(DecodeHintType.TRY_HARDER, true);
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+          BarcodeFormat.EAN_13,
+          BarcodeFormat.EAN_8,
+          BarcodeFormat.UPC_A,
+          BarcodeFormat.UPC_E,
+          BarcodeFormat.CODE_128,
+          BarcodeFormat.CODE_39,
+          BarcodeFormat.CODE_93,
+          BarcodeFormat.ITF,
+          BarcodeFormat.CODABAR,
+          BarcodeFormat.QR_CODE,
+          BarcodeFormat.DATA_MATRIX,
+          BarcodeFormat.AZTEC,
+          BarcodeFormat.PDF_417,
+        ]);
+        const reader = new BrowserMultiFormatReader(hints);
         readerRef.current = reader;
         reader.decodeFromStream(stream, videoRef.current, (result, err) => {
           if (!isActiveRef.current || detectedRef.current) return;
@@ -1157,6 +1344,10 @@ function useFastBarcodeScanner({
     };
   }, [active, startScanning, stopAll]);
 
+  const resetDetection = useCallback(() => {
+    detectedRef.current = false;
+  }, []);
+
   return {
     videoRef,
     isInitializing,
@@ -1164,6 +1355,7 @@ function useFastBarcodeScanner({
     setCameraError,
     startScanning,
     stopAll,
+    resetDetection,
   };
 }
 
@@ -1326,15 +1518,22 @@ function ScannerCameraView({
         style={{ display: cameraError ? "none" : "block" }}
       />
       {!cameraError && !isInitializing && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="relative w-56 h-40">
-            <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
-            <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
-            <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
-            <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
-            <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
+        <>
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="relative w-56 h-40">
+              <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-green-400 rounded-tl" />
+              <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-green-400 rounded-tr" />
+              <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-green-400 rounded-bl" />
+              <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-green-400 rounded-br" />
+              <div className="absolute inset-x-0 top-0 h-0.5 bg-green-400 opacity-80 animate-[scan_2s_linear_infinite]" />
+            </div>
           </div>
-        </div>
+          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-center py-1 pointer-events-none">
+            <span className="text-xs text-green-400 animate-pulse">
+              ● Scanning...
+            </span>
+          </div>
+        </>
       )}
       {isInitializing && (
         <div
@@ -1373,12 +1572,14 @@ interface BarcodeScannerForInputProps {
   open: boolean;
   onClose: () => void;
   onResult: (barcode: string) => void;
+  playSound?: (event: SoundEvent) => void;
 }
 
 function BarcodeScannerForInput({
   open,
   onClose,
   onResult,
+  playSound,
 }: BarcodeScannerForInputProps) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadProcessing, setUploadProcessing] = useState(false);
@@ -1386,11 +1587,12 @@ function BarcodeScannerForInput({
 
   const handleDetected = useCallback(
     (code: string) => {
+      playSound?.("scan");
       onResult(code);
       toast.success(`Barcode scanned: ${code}`);
       onClose();
     },
-    [onResult, onClose],
+    [onResult, onClose, playSound],
   );
 
   const {
@@ -1473,6 +1675,7 @@ interface BarcodeScannerModalProps {
   onClose: () => void;
   menuItems: MenuItem[];
   onAddToCart: (item: MenuItem) => void;
+  playSound?: (event: SoundEvent) => void;
 }
 
 function BarcodeScannerModal({
@@ -1480,10 +1683,13 @@ function BarcodeScannerModal({
   onClose,
   menuItems,
   onAddToCart,
+  playSound,
 }: BarcodeScannerModalProps) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadProcessing, setUploadProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const resetDetectionRef = useRef<(() => void) | null>(null);
 
   const handleDetected = useCallback(
     (code: string) => {
@@ -1491,15 +1697,20 @@ function BarcodeScannerModal({
         (m) => m.barcodeEnabled && m.barcode === code,
       );
       if (item) {
+        playSound?.("scan");
         onAddToCart(item);
         toast.success(`Added: ${item.name}`);
         onClose();
       } else {
+        playSound?.("itemNotFound");
         toast.error(`Item not found for barcode: ${code}`);
-        // Don't close — let user try again
+        // Reset detection after 2s so user can scan again automatically
+        setTimeout(() => {
+          resetDetectionRef.current?.();
+        }, 2000);
       }
     },
-    [menuItems, onAddToCart, onClose],
+    [menuItems, onAddToCart, onClose, playSound],
   );
 
   const {
@@ -1508,11 +1719,15 @@ function BarcodeScannerModal({
     cameraError,
     setCameraError,
     startScanning,
+    resetDetection,
   } = useFastBarcodeScanner({
     active: open,
     onDetected: handleDetected,
     onError: () => {},
   });
+
+  // Keep ref in sync
+  resetDetectionRef.current = resetDetection;
 
   useEffect(() => {
     if (!open) {
@@ -1581,12 +1796,14 @@ interface BillingPageProps {
   menuItems: MenuItem[];
   settings: AppSettings;
   onOrderComplete: (order: Order) => Promise<void>;
+  playSound?: (event: SoundEvent) => void;
 }
 
 function BillingPage({
   menuItems,
   settings,
   onOrderComplete,
+  playSound,
 }: BillingPageProps) {
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<MenuItem[]>([]);
@@ -1627,28 +1844,32 @@ function BillingPage({
     setSearchResults(results);
   }, [search, menuItems]);
 
-  const addToCart = useCallback((item: MenuItem) => {
-    setCart((prev) => {
-      const existing = prev.find((c) => c.menuItemId === item.id);
-      if (existing) {
-        return prev.map((c) =>
-          c.menuItemId === item.id ? { ...c, qty: c.qty + 1 } : c,
-        );
-      }
-      return [
-        ...prev,
-        {
-          menuItemId: item.id,
-          name: item.name,
-          mrp: item.mrp,
-          qty: 1,
-          imageBase64: item.imageBase64,
-        },
-      ];
-    });
-    setSearch("");
-    setSearchResults([]);
-  }, []);
+  const addToCart = useCallback(
+    (item: MenuItem) => {
+      playSound?.("addToCart");
+      setCart((prev) => {
+        const existing = prev.find((c) => c.menuItemId === item.id);
+        if (existing) {
+          return prev.map((c) =>
+            c.menuItemId === item.id ? { ...c, qty: c.qty + 1 } : c,
+          );
+        }
+        return [
+          ...prev,
+          {
+            menuItemId: item.id,
+            name: item.name,
+            mrp: item.mrp,
+            qty: 1,
+            imageBase64: item.imageBase64,
+          },
+        ];
+      });
+      setSearch("");
+      setSearchResults([]);
+    },
+    [playSound],
+  );
 
   // Barcode scanner support
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1752,11 +1973,13 @@ function BillingPage({
     onOrderComplete(order);
     saveLS(LS_ORDER_COUNTER, counter + 1);
     setCompletedOrder(order);
+    playSound?.("payment");
     setShowBillModal(true);
     setPostPayment(true);
   };
 
   const handleDoneOrder = () => {
+    playSound?.("doneClose");
     setCart([]);
     setDiscount(0);
     setCustomerName("");
@@ -2543,6 +2766,7 @@ function BillingPage({
         onClose={() => setShowCameraModal(false)}
         menuItems={menuItems}
         onAddToCart={addToCart}
+        playSound={playSound}
       />
 
       {/* SHARE BILL DIALOG */}
@@ -2588,9 +2812,14 @@ function BillingPage({
 interface ManageMenuPageProps {
   menuItems: MenuItem[];
   setMenuItems: (items: MenuItem[]) => Promise<void>;
+  playSound?: (event: SoundEvent) => void;
 }
 
-function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
+function ManageMenuPage({
+  menuItems,
+  setMenuItems,
+  playSound,
+}: ManageMenuPageProps) {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -2604,6 +2833,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
   const [imageMode, setImageMode] = useState<"upload" | "url">("upload");
   const [imageUrl, setImageUrl] = useState("");
   const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
 
   const openAdd = () => {
     setForm({
@@ -2871,6 +3101,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
               </div>
               {imageMode === "upload" ? (
                 <input
+                  ref={imageFileInputRef}
                   type="file"
                   accept="image/*"
                   onChange={handleImageUpload}
@@ -2906,6 +3137,8 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
                     onClick={() => {
                       setForm({ ...form, imageBase64: "" });
                       setImageUrl("");
+                      if (imageFileInputRef.current)
+                        imageFileInputRef.current.value = "";
                     }}
                   >
                     <Trash2 className="w-3 h-3 mr-1" />
@@ -2939,6 +3172,7 @@ function ManageMenuPage({ menuItems, setMenuItems }: ManageMenuPageProps) {
         open={showBarcodeScanner}
         onClose={() => setShowBarcodeScanner(false)}
         onResult={(barcode) => setForm((prev) => ({ ...prev, barcode }))}
+        playSound={playSound}
       />
 
       {/* Delete Confirm */}
@@ -3453,17 +3687,216 @@ function CustomerDetailsPage({ orders }: CustomerDetailsPageProps) {
 }
 
 // =============================================================================
+// SOUNDS CARD (reused in both SettingsPage and SoundsPage)
+// =============================================================================
+interface SoundsCardProps {
+  soundForm: SoundSettings;
+  updateSound: (updates: Partial<SoundSettings>) => void;
+  playSound: (event: SoundEvent) => void;
+}
+
+const SOUND_EVENTS: {
+  key: SoundEvent;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: "scan",
+    label: "Barcode Scan",
+    description: "Beep when barcode is detected",
+  },
+  { key: "login", label: "Login", description: "Sound when logging in" },
+  { key: "logout", label: "Logout", description: "Sound when logging out" },
+  {
+    key: "payment",
+    label: "Payment",
+    description: "Sound when payment is completed",
+  },
+  {
+    key: "doneClose",
+    label: "Done & Close",
+    description: "Sound when order is closed",
+  },
+  {
+    key: "addToCart",
+    label: "Add to Cart",
+    description: "Sound when item added to cart",
+  },
+  {
+    key: "error",
+    label: "Error",
+    description: "Sound for validation errors",
+  },
+  {
+    key: "itemNotFound",
+    label: "Item Not Found",
+    description: "Sound when barcode item is not found",
+  },
+];
+
+function SoundsCard({ soundForm, updateSound, playSound }: SoundsCardProps) {
+  return (
+    <div className="bg-card rounded-xl border border-border p-5 space-y-5">
+      <div className="flex items-center gap-2 mb-1">
+        <Volume2 className="w-5 h-5 text-primary" />
+        <h2 className="text-lg font-bold text-primary">Sounds</h2>
+      </div>
+      <p className="text-sm text-muted-foreground -mt-3">
+        Sounds save automatically — no need to click Save Settings.
+      </p>
+
+      <Separator className="bg-border" />
+
+      {/* Master enable */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-semibold text-base">Enable All Sounds</p>
+          <p className="text-sm text-muted-foreground">
+            Master switch for all app sounds
+          </p>
+        </div>
+        <Switch
+          data-ocid="settings.sounds.toggle"
+          checked={soundForm.enabled}
+          onCheckedChange={(v) => updateSound({ enabled: v })}
+        />
+      </div>
+
+      {/* Volume */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <Label className="font-semibold text-base">
+            Volume: {soundForm.volume}%
+          </Label>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={soundForm.volume}
+          data-ocid="settings.sounds.volume.input"
+          onChange={(e) => updateSound({ volume: Number(e.target.value) })}
+          className="w-full h-2 rounded-lg appearance-none cursor-pointer accent-primary bg-secondary"
+          disabled={!soundForm.enabled}
+        />
+        <div className="flex justify-between text-xs text-muted-foreground mt-1">
+          <span>0%</span>
+          <span>50%</span>
+          <span>100%</span>
+        </div>
+      </div>
+
+      <Separator className="bg-border" />
+
+      {/* Sound events table */}
+      <div className="space-y-3">
+        <p className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+          Sound Events
+        </p>
+        {SOUND_EVENTS.map((ev) => (
+          <div
+            key={ev.key}
+            className="flex items-center justify-between gap-3 py-2 border-b border-border last:border-0"
+          >
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-sm">{ev.label}</p>
+              <p className="text-xs text-muted-foreground">{ev.description}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="border-border text-xs h-8 px-3"
+                disabled={!soundForm.enabled || !soundForm[ev.key]}
+                onClick={() => playSound(ev.key)}
+              >
+                Test
+              </Button>
+              <Switch
+                checked={soundForm[ev.key]}
+                onCheckedChange={(v) => updateSound({ [ev.key]: v })}
+                disabled={!soundForm.enabled}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// SOUNDS PAGE (standalone page)
+// =============================================================================
+interface SoundsPageProps {
+  soundSettings: React.MutableRefObject<SoundSettings>;
+  updateSoundSettings: (s: SoundSettings) => void;
+  playSound: (event: SoundEvent) => void;
+}
+
+function SoundsPage({
+  soundSettings,
+  updateSoundSettings,
+  playSound,
+}: SoundsPageProps) {
+  const [soundForm, setSoundForm] = useState<SoundSettings>(
+    () => soundSettings.current,
+  );
+
+  const updateSound = (updates: Partial<SoundSettings>) => {
+    const next = { ...soundForm, ...updates };
+    setSoundForm(next);
+    updateSoundSettings(next);
+  };
+
+  return (
+    <div className="space-y-4 pb-8 max-w-2xl">
+      <h1 className="text-2xl font-bold">Sounds</h1>
+      <SoundsCard
+        soundForm={soundForm}
+        updateSound={updateSound}
+        playSound={playSound}
+      />
+    </div>
+  );
+}
+
+// =============================================================================
 // SETTINGS PAGE
 // =============================================================================
 interface SettingsPageProps {
   settings: AppSettings;
   setSettings: (s: AppSettings) => Promise<void>;
+  soundSettings: React.MutableRefObject<SoundSettings>;
+  updateSoundSettings: (s: SoundSettings) => void;
+  playSound: (event: SoundEvent) => void;
 }
 
-function SettingsPage({ settings, setSettings }: SettingsPageProps) {
+function SettingsPage({
+  settings,
+  setSettings,
+  soundSettings,
+  updateSoundSettings,
+  playSound,
+}: SettingsPageProps) {
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [isDirty, setIsDirty] = useState(false);
   const [confirmRestartOrder, setConfirmRestartOrder] = useState(false);
+  const billLogoFileInputRef = useRef<HTMLInputElement>(null);
+  const websiteLogoFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sounds local form state (loaded from soundSettings ref)
+  const [soundForm, setSoundForm] = useState<SoundSettings>(
+    () => soundSettings.current,
+  );
+
+  const updateSound = (updates: Partial<SoundSettings>) => {
+    const next = { ...soundForm, ...updates };
+    setSoundForm(next);
+    updateSoundSettings(next);
+  };
 
   // Sync form when settings change from backend polling, but ONLY if the user has not made unsaved edits
   useEffect(() => {
@@ -3542,13 +3975,34 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
               className="h-16 w-auto object-contain mb-2 rounded border border-border"
             />
           )}
-          <input
-            type="file"
-            accept="image/*"
-            onChange={handleBillLogoUpload}
-            data-ocid="settings.bill_logo.upload_button"
-            className="block w-full text-sm text-muted-foreground file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-secondary file:text-foreground hover:file:bg-accent cursor-pointer"
-          />
+          <div className="flex items-center gap-3 flex-wrap">
+            <input
+              ref={billLogoFileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleBillLogoUpload}
+              data-ocid="settings.bill_logo.upload_button"
+              className="block flex-1 text-sm text-muted-foreground file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-secondary file:text-foreground hover:file:bg-accent cursor-pointer"
+            />
+            {form.billLogoBase64 && (
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                data-ocid="settings.bill_logo.remove_button"
+                onClick={() => {
+                  setIsDirty(true);
+                  setForm((prev) => ({ ...prev, billLogoBase64: "" }));
+                  if (billLogoFileInputRef.current)
+                    billLogoFileInputRef.current.value = "";
+                }}
+                className="shrink-0"
+              >
+                <Trash2 className="w-3 h-3 mr-1" />
+                Remove
+              </Button>
+            )}
+          </div>
         </div>
 
         <Separator className="bg-border" />
@@ -3565,13 +4019,34 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
               className="h-16 w-auto object-contain mb-2 rounded border border-border"
             />
           )}
-          <input
-            type="file"
-            accept="image/*"
-            onChange={handleWebsiteLogoUpload}
-            data-ocid="settings.website_logo.upload_button"
-            className="block w-full text-sm text-muted-foreground file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-secondary file:text-foreground hover:file:bg-accent cursor-pointer"
-          />
+          <div className="flex items-center gap-3 flex-wrap">
+            <input
+              ref={websiteLogoFileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleWebsiteLogoUpload}
+              data-ocid="settings.website_logo.upload_button"
+              className="block flex-1 text-sm text-muted-foreground file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-secondary file:text-foreground hover:file:bg-accent cursor-pointer"
+            />
+            {form.websiteLogoBase64 && (
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                data-ocid="settings.website_logo.remove_button"
+                onClick={() => {
+                  setIsDirty(true);
+                  setForm((prev) => ({ ...prev, websiteLogoBase64: "" }));
+                  if (websiteLogoFileInputRef.current)
+                    websiteLogoFileInputRef.current.value = "";
+                }}
+                className="shrink-0"
+              >
+                <Trash2 className="w-3 h-3 mr-1" />
+                Remove
+              </Button>
+            )}
+          </div>
         </div>
 
         <Separator className="bg-border" />
@@ -3756,6 +4231,13 @@ function SettingsPage({ settings, setSettings }: SettingsPageProps) {
       >
         Save Settings
       </Button>
+
+      {/* SOUNDS SECTION */}
+      <SoundsCard
+        soundForm={soundForm}
+        updateSound={updateSound}
+        playSound={playSound}
+      />
 
       {/* Restart Order Confirm */}
       <AlertDialog
@@ -4167,6 +4649,7 @@ function toLocalSettings(s: BackendSettings): AppSettings {
 // =============================================================================
 export default function App() {
   const { actor, isFetching: actorFetching } = useActor();
+  const { playSound, soundSettings, updateSoundSettings } = useSoundSystem();
 
   // ---------------------------------------------------------------------------
   // AUTH STATE
@@ -4360,6 +4843,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    playSound("logout");
     sessionStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem(SESSION_ROLE_KEY);
     setCurrentUser(null);
@@ -4385,6 +4869,7 @@ export default function App() {
             setCurrentRole(role);
           }}
           settings={settings}
+          playSound={playSound}
         />
         <Toaster richColors />
       </>
@@ -4409,20 +4894,41 @@ export default function App() {
             menuItems={menuItems}
             settings={settings}
             onOrderComplete={handleOrderComplete}
+            playSound={playSound}
           />
         );
       case "manage-menu":
         return (
-          <ManageMenuPage menuItems={menuItems} setMenuItems={setMenuItems} />
+          <ManageMenuPage
+            menuItems={menuItems}
+            setMenuItems={setMenuItems}
+            playSound={playSound}
+          />
         );
       case "sales-report":
         return <SalesReportPage orders={orders} setOrders={setOrders} />;
       case "customer-details":
         return <CustomerDetailsPage orders={orders} />;
       case "settings":
-        return <SettingsPage settings={settings} setSettings={setSettings} />;
+        return (
+          <SettingsPage
+            settings={settings}
+            setSettings={setSettings}
+            soundSettings={soundSettings}
+            updateSoundSettings={updateSoundSettings}
+            playSound={playSound}
+          />
+        );
       case "manage-users":
         return <ManageUsersPage users={users} setUsers={setUsers} />;
+      case "sounds":
+        return (
+          <SoundsPage
+            soundSettings={soundSettings}
+            updateSoundSettings={updateSoundSettings}
+            playSound={playSound}
+          />
+        );
       default:
         return null;
     }
@@ -4435,6 +4941,7 @@ export default function App() {
     "customer-details": "Customer Details",
     settings: "Settings",
     "manage-users": "Manage Users",
+    sounds: "Sounds",
   };
 
   return (
