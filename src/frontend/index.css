@@ -72,8 +72,11 @@
 }
 
 /* Print styles — bill printing is handled via iframe injection in JS */
+/* The iframe prints its own isolated document, so we hide the main app entirely */
 @media print {
-  /* Prevent accidental page printing of the main app */
+  body > * {
+    display: none !important;
+  }
   body {
     background: #ffffff !important;
   }

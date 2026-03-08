@@ -2140,7 +2140,7 @@ function BillingPage({
       .join("");
 
     const billHtml = `
-      <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:8px;line-height:1.5;">
+      <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:0;line-height:1.5;width:100%;">
         ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
         <div style="text-align:center;margin-bottom:6px;">
           <p style="font-weight:bold;font-size:15px;margin:0;">${s.shopName}</p>
@@ -2196,7 +2196,7 @@ function BillingPage({
 
     const iframe = document.createElement("iframe");
     iframe.style.cssText =
-      "position:fixed;left:-9999px;top:0;width:0;height:0;border:none;";
+      "position:fixed;left:-9999px;top:0;width:1px;height:1px;border:none;visibility:hidden;";
     document.body.appendChild(iframe);
     const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
     if (!iframeDoc) {
@@ -2209,12 +2209,13 @@ function BillingPage({
 <head>
 <meta charset="utf-8"/>
 <style>
-  @page { size: 58mm auto; margin: 4mm; }
-  body { margin: 0; padding: 0; background: #fff; color: #000; font-family: 'Courier New', Courier, monospace; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @page { size: auto; margin: 8mm; }
+  html, body { margin: 0; padding: 0; background: #fff; color: #000; font-family: 'Courier New', Courier, monospace; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   * { box-sizing: border-box; }
+  .bill-wrap { max-width: 100%; width: fit-content; margin: 0 auto; }
 </style>
 </head>
-<body>${billHtml}</body>
+<body><div class="bill-wrap">${billHtml}</div></body>
 </html>`);
     iframeDoc.close();
 
@@ -2273,7 +2274,7 @@ function BillingPage({
         .join("");
 
       const billInnerHtml = `
-        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:12px;line-height:1.5;">
+        <div style="background:#fff;color:#000;font-family:'Courier New',Courier,monospace;font-size:13px;padding:0;line-height:1.5;width:100%;">
           ${s.billLogoBase64 ? `<div style="text-align:center;margin-bottom:10px;"><img src="${s.billLogoBase64}" style="height:64px;width:auto;object-fit:contain;" /></div>` : ""}
           <div style="text-align:center;margin-bottom:6px;">
             <p style="font-weight:bold;font-size:15px;margin:0;">${s.shopName}</p>
@@ -2327,13 +2328,13 @@ function BillingPage({
         </div>
       `;
 
-      // Create container positioned just off viewport top (not -9999px) for reliable rendering
+      // Create container — use 360px width for a clean receipt look on all screen sizes
       const container = document.createElement("div");
       container.style.cssText = [
         "position:fixed",
         "top:0",
         "left:0",
-        "width:320px",
+        "width:360px",
         "background:#ffffff",
         "color:#000000",
         "font-family:'Courier New',Courier,monospace",
@@ -2342,6 +2343,7 @@ function BillingPage({
         "z-index:-9999",
         "opacity:0",
         "pointer-events:none",
+        "padding:12px",
       ].join(";");
       container.innerHTML = billInnerHtml;
       document.body.appendChild(container);
@@ -2363,13 +2365,16 @@ function BillingPage({
           ),
         );
       }
-      // Extra settle time
-      await new Promise((r) => setTimeout(r, 150));
+      // Extra settle time for fonts/rendering
+      await new Promise((r) => setTimeout(r, 300));
 
       const dataUrl = await toPng(container, {
         backgroundColor: "#ffffff",
         pixelRatio: 2,
-        width: 320,
+        width: 360,
+        style: {
+          padding: "12px",
+        },
       });
 
       document.body.removeChild(container);
